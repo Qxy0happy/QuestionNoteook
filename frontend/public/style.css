@@ -1,0 +1,27 @@
+:root {
+    color-scheme: dark;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial,
+        sans-serif, "Apple Color Emoji", "Segoe UI Emoji";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    -webkit-text-size-adjust: 100%;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+    margin: 0;
+    height: 100%;
+    background: #06070f;
+    color: #f4f6fb;
+    /* 整个 app 在内部横向平移，页面自身永不滚动。 */
+    overflow: hidden;
+    /* 这是应用不是文档：默认禁选。可编辑区域自己 opt-in。 */
+    -webkit-user-select: none;
+    user-select: none;
+    /* 桌面端可以拖窗背景移动窗口（继承给子元素，交互控件用 no-drag 退出）。 */
+    --wails-draggable: drag;
+}
+
+/* 框架挂载点不参与布局，让 .pages 直接拿到全高。 */
+#app { display: contents; }

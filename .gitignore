@@ -1,0 +1,21 @@
+.task
+bin
+frontend/dist
+frontend/node_modules
+build/linux/appimage/build
+build/windows/nsis/MicrosoftEdgeWebview2Setup.exe
+# Mobile generated (per-machine; overlays hold absolute paths)
+build/ios/xcode/overlay.json
+build/ios/xcode/gen/
+build/android/overlay.json
+build/android/gen/
+# ---- Gradle / Android 构建产物 ----
+# `build/android/` 整个是 wails3 init 生成的安卓工程，以下都是构建时产出的。
+# 缺这几条，首次提交会带上约 160MB。
+build/android/.gradle/
+build/android/build/
+build/android/app/build/
+# Go 交叉编译出的 libwails.so（compile:go:shared 产出，再由 Gradle 打进 APK）
+build/android/app/src/main/jniLibs/
+# AGP 生成，内容是本机 SDK 的绝对路径
+build/android/local.properties

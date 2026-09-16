@@ -1,0 +1,7 @@
+// Top-level build file where you can add configuration options common to all sub-projects/modules.
+plugins {
+    // Wails 脚手架钉的是 8.7.3（2024 年底），但 AGP 8 配 JDK 26 会挂在
+    // JdkImageTransform 的 jlink 调用上（Google issuetracker 486844145），
+    // AGP 9 才修。本机唯一 JDK 是 26，所以必须升。
+    id 'com.android.application' version '9.2.0' apply false
+}

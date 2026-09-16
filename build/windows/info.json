@@ -1,0 +1,15 @@
+{
+	"fixed": {
+		"file_version": "0.1.0"
+	},
+	"info": {
+		"0000": {
+			"ProductVersion": "0.1.0",
+			"CompanyName": "My Company",
+			"FileDescription": "考研错题拍照整理与 FSRS 复习",
+			"LegalCopyright": "© 2026, My Company",
+			"ProductName": "错题本",
+			"Comments": "This is a comment"
+		}
+	}
+}

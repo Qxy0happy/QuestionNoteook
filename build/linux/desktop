@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Name=错题本
+Comment=考研错题拍照整理与 FSRS 复习
+# The Exec line includes %u to pass the URL to the application
+Exec=/usr/local/bin/questionbook.exe %u
+Terminal=false
+Type=Application
+Icon=questionbook.exe
+Categories=Utility;
+StartupWMClass=questionbook.exe
+
+ 

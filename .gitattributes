@@ -1,0 +1,22 @@
+# 统一行尾：仓库内一律 LF。否则 Windows 上 git 会一直刷
+# "LF will be replaced by CRLF" 警告，而且 Unix shell 脚本
+# （build/android/gradlew、build/linux/nfpm/*.sh）被写出 CRLF 后就废了。
+* text=auto eol=lf
+
+# Windows 批处理得是 CRLF —— cmd.exe 对纯 LF 的 .bat 不总是可靠。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制：别做行尾转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.icns binary
+*.ttf binary
+*.jar binary
+*.so binary
+*.exe binary
+*.apk binary
+*.zip binary
