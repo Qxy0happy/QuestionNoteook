@@ -39,6 +39,19 @@
   let loading = $state(false);
   let listError = $state('');
 
+  // ── 学科页签（用户 2026-09-16：复习要分学科进行）──
+  //
+  // 页签只列**学科**（顶层标签），默认停在第一门 —— 用户原话「默认停在第一个，也即数学」。
+  // **没有「未打标签」那一页**：没归过类的题哪个页签都装不下，于是等于不参与复习，
+  // 这正是他要的（新题先在题库页归好类，再到复习里来）。
+  //
+  // 筛在**前端**做，后端那条队列查询一个字没动：它照旧把没标签的到期题一起带回来，
+  // 这一页按学科把它们筛掉。
+  let allTags = $state<Tag[]>([]);
+  let subjectTab = $state(0); // 0 = 还没落定（第一门学科到位时自动落上去）
+  // 每道题挂了哪些标签（只存 id）。队列那条查询不带标签，所以单独问一次 TagsOfQuestions。
+  let questionTags = $state<Map<number, number[]>>(new Map());
+
   // 放大。手势本身在 zoom.ts 里，这里只用它的回调记一下「放大没有」—— 放大时得把溢出裁掉，
   // 否则放大的那半张会盖到另一张图上（或者底部那排评级按钮上）。
   let qZoomed = $state(false);
@@ -67,13 +80,47 @@
   // 采纳之后已经评了几道。闸是「再做 cap 道」，所以数的是从采纳那一刻起的新账。
   let done = $state(0);
 
+  // 页签上的学科，顺序照 Go 侧 List() 给的顺序（先建的在前）—— 这里不再排一次。
+  const subjects = $derived(allTags.filter((t) => t.Level === Level.LevelSubject));
+  const selectedSubject = $derived(subjects.find((s) => s.ID === subjectTab) ?? null);
+
+  // 选中那门学科（**含子孙**）的标签 id。
+  //
+  // 点一门学科要带出它下面所有章节与知识点的题 —— 与题库页同一条规则。那边走的是 Go 侧
+  // 的子树 CTE，这一页只做前端筛选，所以自己顺着 ParentID 展开一遍（最多三层，用队列不递归）。
+  const subjectTagIDs = $derived.by(() => {
+    const ids = new Set<number>();
+    const root = allTags.find((t) => t.ID === subjectTab);
+    if (!root) return ids;
+
+    const byParent = new Map<number, Tag[]>();
+    for (const t of allTags) {
+      const siblings = byParent.get(t.ParentID);
+      if (siblings) siblings.push(t);
+      else byParent.set(t.ParentID, [t]);
+    }
+    const out: Tag[] = [root];
+    for (let i = 0; i < out.length; i++) {
+      ids.add(out[i].ID);
+      out.push(...(byParent.get(out[i].ID) ?? []));
+    }
+    return ids;
+  });
+
+  // **这一门学科下**今天到期的题。队列本身不变（后端那次查询的结果），只是这一页看它的一部分。
+  const visible = $derived(
+    queue.filter((it) =>
+      (questionTags.get(it.Question.ID) ?? []).some((id) => subjectTagIDs.has(id)),
+    ),
+  );
+
   // 「还剩多少道」。有闸时它取闸与队列里较小的那个 —— 队列本身不会因为闸而变短。
-  const remaining = $derived(cap > 0 ? Math.min(queue.length, Math.max(0, cap - done)) : queue.length);
-  // 到量了：闸卡住了，但队列里还有题（队列空的时候走的是「今天没有要复习的题」那一屏）。
+  const remaining = $derived(cap > 0 ? Math.min(visible.length, Math.max(0, cap - done)) : visible.length);
+  // 到量了：闸卡住了，但这一门里还有题（没题的时候走的是下面那一屏）。
   //
   // 还要求 current 为 null：做完闸里的最后一道时，那一道的答案图与标签正显示在屏幕上，
   // 不该被这一屏顶掉（要等用户按了「下一题」）。showNext 里那条同样的判断负责把它们收起来。
-  const finished = $derived(cap > 0 && done >= cap && queue.length > 0 && current === null);
+  const finished = $derived(cap > 0 && done >= cap && visible.length > 0 && current === null);
 
   let questionUrl = $state<string | null>(null);
   let questionError = $state('');
@@ -101,6 +148,18 @@
     try {
       // 后端已按到期时刻排好（拖得最久的在前），这里不再排一次 —— 再排会跟它的并列规则打架。
       queue = (await Review.Queue()) ?? [];
+      // 页签要判断「这道题算不算这门学科的」，所以得知道每道题挂了什么标签。
+      // 队列那条查询不带标签（后端不动），所以单独问一次 —— 只是今天这一批题，很小。
+      allTags = (await Tags.List()) ?? [];
+      const ids = queue.map((it) => it.Question.ID);
+      const rows = ids.length > 0 ? ((await Tags.TagsOfQuestions(ids)) ?? []) : [];
+      const m = new Map<number, number[]>();
+      for (const row of rows) m.set(row.QuestionID, (row.Tags ?? []).map((t) => t.ID));
+      questionTags = m;
+      // 页签落位：默认第一门（用户：「默认停在第一个，也即数学」）。
+      // 选中的那门被删掉（或者第一次进来）时也回到第一门 —— 否则这一页会一直空着，
+      // 而队列里明明有题，没人看得出来是页签选错了。
+      if (!subjects.some((s) => s.ID === subjectTab)) subjectTab = subjects[0]?.ID ?? 0;
       listError = '';
       showNext();
       // 推荐**不等**：它是另一次网络往返（Go 侧要去问模型），队列不该为它多转一会儿。
@@ -145,7 +204,8 @@
       return;
     }
 
-    const next = queue[0] ?? null;
+    // 队头取**这一门**的（不是整条队列的）：页签换了一门，端上来的就该是那一门的题。
+    const next = visible[0] ?? null;
     current = next;
     result = null;
     answerUrl = null;
@@ -296,6 +356,14 @@
     done = 0;
     showNext();
   }
+
+  // 换一门学科 = 换一条队列。把当前这道收起来，从新学科的队头重新开始 ——
+  // 上一门的题留在屏幕上会让人以为页签没生效。
+  function selectSubject(id: number) {
+    if (id === subjectTab) return;
+    subjectTab = id;
+    showNext();
+  }
 </script>
 
 <div class="review" bind:this={root}>
@@ -305,6 +373,24 @@
       <span class="count">还剩 {remaining} 道</span>
     {/if}
   </header>
+
+  <!-- 学科页签。只在有学科时才出现 —— 一门都还没建的时候，下面那一屏会说该去干什么。
+       用一排按钮而不是靠横滑：横滑在 App 那一层是**翻页**（切「拍照/题库/复习/设置」），
+       这里再套一层横滑，同一个手势就会有两种意思（与题库页、设置页的页签同一个理由）。 -->
+  {#if subjects.length > 0}
+    <nav class="tabs" aria-label="按学科复习">
+      {#each subjects as s (s.ID)}
+        <button
+          class="tab"
+          class:on={subjectTab === s.ID}
+          aria-current={subjectTab === s.ID ? 'page' : undefined}
+          onclick={() => selectSubject(s.ID)}
+        >
+          {s.Name}
+        </button>
+      {/each}
+    </nav>
+  {/if}
 
   {#if listError}
     <p class="banner">{listError}</p>
@@ -341,8 +427,22 @@
     </div>
   {:else if !current}
     <div class="empty">
-      <p class="empty-main">今天没有要复习的题</p>
-      <p class="empty-sub">到期日是今天或更早的题会出现在这里。去题库页多拍几道吧。</p>
+      {#if subjects.length === 0}
+        <!-- 一门学科都还没建。这一页是**按学科**复习的，所以这里得说清第一步在哪儿。 -->
+        <p class="empty-main">复习按学科进行</p>
+        <p class="empty-sub">
+          先去题库页建一门学科，再给要复习的题打上学科标签 —— 归好类的题才会排到这儿来。
+        </p>
+      {:else if queue.length === 0}
+        <p class="empty-main">今天没有要复习的题</p>
+        <p class="empty-sub">到期日是今天或更早的题会出现在这里。去题库页多拍几道吧。</p>
+      {:else}
+        <!-- 队列里有题，但都不是这一门的 —— 说清楚去哪儿找，别让人以为题库空了。 -->
+        <p class="empty-main">「{selectedSubject?.Name}」今天没有到期的题</p>
+        <p class="empty-sub">
+          今天到期的题里没有归到这门学科下的。到别的学科页签看看，或者去题库页把它们归到这门。
+        </p>
+      {/if}
     </div>
   {:else}
     <!-- 题图占满中间，自己滚；评级条钉在下面，单手也够得着。
@@ -486,6 +586,40 @@
   .count {
     font-size: 0.85rem;
     color: rgba(244, 246, 251, 0.5);
+  }
+
+  /* 学科页签。横向排、装不下横着滚 —— 学科是用户自己加的，数量没有上限。
+     长相与题库页那一排、设置页那一排一致（同一个人做的同一件事，不该有三种样子）。 */
+  .tabs {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.6rem 1rem;
+    border-bottom: 1px solid rgba(244, 246, 251, 0.1);
+    overflow-x: auto;
+    /* 滑到头不把整页三页横滑也带走。 */
+    overscroll-behavior-x: contain;
+  }
+  .tab {
+    flex: none;
+    padding: 0.4rem 1rem;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    background: transparent;
+    color: rgba(244, 246, 251, 0.6);
+    font: inherit;
+    font-size: 0.9rem;
+    cursor: pointer;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    --wails-draggable: no-drag;
+  }
+  .tab.on {
+    border-color: rgba(130, 200, 255, 0.6);
+    background: rgba(130, 200, 255, 0.14);
+    color: #9fd4ff;
+    font-weight: 600;
   }
 
   /* 推荐条：夹在标题栏与题图之间，窄窄一条。它随时可能整个不渲染（拿不到推荐时），
