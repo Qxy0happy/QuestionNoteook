@@ -39,12 +39,16 @@ func main() {
 	}
 	defer db.Close()
 
+	// 依赖方向只有一条：采集 → 题库。题库要能读题图，所以把一个「按 hash 取图」的能力
+	// 注进去（capture.Store 正好满足），而不是让两边互相 import。
+	libraryService := library.NewService(db, cardStore)
+
 	app := application.New(application.Options{
 		Name:        "错题本",
 		Description: "考研错题拍照整理与 FSRS 复习",
 		Services: []application.Service{
-			application.NewService(capture.NewService(cardStore)),
-			application.NewService(library.NewService(db)),
+			application.NewService(capture.NewService(cardStore, libraryService)),
+			application.NewService(libraryService),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),

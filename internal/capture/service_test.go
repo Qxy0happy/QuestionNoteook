@@ -8,14 +8,16 @@ import (
 	"image/draw"
 	"image/png"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"questionbook/internal/capture"
+	"questionbook/internal/library"
 )
 
-// Service 是前端唯一碰得到的那一面，而它之前一行测试都没有 ——
-// 底下 Rectify 与 Store 各有覆盖，卡在它们上面这层（base64 进、base64 出、
-// 角点顺序、以及两次落盘只出一个文件）反而没人管。
+// Service 是前端唯一碰得到的那一面。采集这半边现在还要把拍下的一道题落成**错题**
+// （capture → library），所以这些测试搭的是与 main.go 同一套接线：真文件层 + 真库，
+// 都落在临时目录里 —— 服务层是唯一的测试缝（见 spec），不必跑起 Wails。
 //
 // 只用导出的 API，自己造图，不依赖 fixture_test.go 里的东西。
 
@@ -68,14 +70,45 @@ func encodePNG(t *testing.T, img image.Image) string {
 	return base64.StdEncoding.EncodeToString(buf.Bytes())
 }
 
-func newService(t *testing.T) (*capture.Service, string) {
+// harness 是服务层那套接线：题图 Store + 库 + 采集。
+// 两个服务都拿得到，因为一次采集的产物横跨它们俩。
+type harness struct {
+	svc      *capture.Service
+	lib      *library.Service
+	cardsDir string
+}
+
+func newHarness(t *testing.T) harness {
 	t.Helper()
-	dir := t.TempDir()
-	store, err := capture.NewStore(dir)
+	root := t.TempDir()
+	cardsDir := filepath.Join(root, "cards")
+
+	cards, err := capture.NewStore(cardsDir)
 	if err != nil {
-		t.Fatalf("开 store 失败: %v", err)
+		t.Fatalf("开题图目录失败: %v", err)
 	}
-	return capture.NewService(store), dir
+	db, err := library.Open(filepath.Join(root, "library.db"))
+	if err != nil {
+		t.Fatalf("开库失败: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	lib := library.NewService(db, cards)
+	return harness{svc: capture.NewService(cards, lib), lib: lib, cardsDir: cardsDir}
+}
+
+// listCards 返回题图目录里的文件名，用来看落盘到底落了几个。
+func (h harness) listCards(t *testing.T) []string {
+	t.Helper()
+	entries, err := os.ReadDir(h.cardsDir)
+	if err != nil {
+		t.Fatalf("读题图目录失败: %v", err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	return names
 }
 
 // squareQuad 是 quadrantImage(n) 的四角，按约定顺序：左上 → 右上 → 右下 → 左下。
@@ -101,56 +134,106 @@ func reversedSquareQuad(n int) capture.Quad {
 	}
 }
 
+// 本票要买的就是这个：**一次调用之后库里就有那道错题**。
+//
+// 以前是「先要 hash、前端再另起一次 Add」，两次 IPC 之间失败就留下一张库未引用的题图。
+// 所以这里断言的不是「返回了一个 id」，而是返回的那道错题**已经在库里**、并且题图
+// 按它的 hash 取得回来 —— 前端不需要再补写任何东西。
+func TestCaptureLeavesTheQuestionInLibrary(t *testing.T) {
+	const n = 40
+	h := newHarness(t)
+
+	q, err := h.svc.Capture(encodePNG(t, quadrantImage(n)), squareQuad(n))
+	if err != nil {
+		t.Fatalf("Capture 失败: %v", err)
+	}
+	if q.ID == 0 {
+		t.Fatal("Capture 返回的错题没有 id")
+	}
+	if q.QuestionHash == "" {
+		t.Fatal("Capture 返回的错题没有题图 hash")
+	}
+	if q.HasAnswer() {
+		t.Error("手边还没答案图，AnswerHash 应当是空串")
+	}
+
+	// 返回的那条就是库里的那条，不是一条「稍后再由前端补写」的承诺。
+	got, err := h.lib.Get(q.ID)
+	if err != nil {
+		t.Fatalf("Capture 之后按 id 取不到错题: %v", err)
+	}
+	if got.QuestionHash != q.QuestionHash || got.AnswerHash != q.AnswerHash || !got.CreatedAt.Equal(q.CreatedAt) {
+		t.Errorf("库里的错题是 %+v，Capture 返回的是 %+v", got, q)
+	}
+
+	// 题库列表里也看得到它 —— 拍完滑到题库页就该有这一道。
+	qs, err := h.lib.List()
+	if err != nil {
+		t.Fatalf("列出错题: %v", err)
+	}
+	if len(qs) != 1 || qs[0].ID != q.ID {
+		t.Fatalf("库里有 %d 道错题（%+v），期望只有刚拍的这一道", len(qs), qs)
+	}
+
+	// 题图也真的按内容 hash 落了盘，取得回来。
+	if files := h.listCards(t); len(files) != 1 {
+		t.Errorf("题图目录里有 %v，期望只有 1 个文件", files)
+	}
+	if _, err := h.lib.QuestionImage(q.QuestionHash); err != nil {
+		t.Errorf("按返回的 hash 取不回题图: %v", err)
+	}
+}
+
 // 一张正正方形的框 == 恒等变换。这走的正是今天前端唯一的调用形态
 // （选框是轴对齐矩形，传进来的 quad 就是裁后图的四个角），所以它必须过。
-func TestServiceRectifyThenCardRoundTrip(t *testing.T) {
+func TestServiceCaptureRoundTrip(t *testing.T) {
 	const n = 40
 	src := quadrantImage(n)
-
-	svc, dir := newService(t)
+	h := newHarness(t)
 	encoded := encodePNG(t, src)
 
-	hash, err := svc.Rectify(encoded, squareQuad(n))
+	q, err := h.svc.Capture(encoded, squareQuad(n))
 	if err != nil {
-		t.Fatalf("Rectify 失败: %v", err)
-	}
-	if hash == "" {
-		t.Fatal("Rectify 返回了空 hash")
+		t.Fatalf("Capture 失败: %v", err)
 	}
 
-	// 同一张图再来一次：hash 必须一样，目录里也不能多出第二个文件。
-	again, err := svc.Rectify(encoded, squareQuad(n))
+	// 同一张图再来一次：内容寻址，hash 必须一样，目录里也不能多出第二个文件。
+	again, err := h.svc.Capture(encoded, squareQuad(n))
 	if err != nil {
-		t.Fatalf("第二次 Rectify 失败: %v", err)
+		t.Fatalf("第二次 Capture 失败: %v", err)
 	}
-	if again != hash {
-		t.Errorf("同一张图两次得到不同 hash: %q vs %q", hash, again)
+	if again.QuestionHash != q.QuestionHash {
+		t.Errorf("同一张图两次得到不同 hash: %q vs %q", q.QuestionHash, again.QuestionHash)
 	}
-	entries, err := os.ReadDir(dir)
+	if files := h.listCards(t); len(files) != 1 {
+		t.Errorf("去重失效：题图目录里有 %v，期望只有 1 个文件", files)
+	}
+	// 两次采集是两道错题，共用同一张题图 —— 去重发生在文件那一层，不在错题这一层（ADR-0004）。
+	qs, err := h.lib.List()
 	if err != nil {
-		t.Fatalf("读题图目录失败: %v", err)
+		t.Fatalf("列出错题: %v", err)
 	}
-	if len(entries) != 1 {
-		t.Errorf("去重失效：目录里有 %d 个文件，期望 1 个", len(entries))
+	if len(qs) != 2 {
+		t.Errorf("两次采集之后库里有 %d 道错题，期望 2 道", len(qs))
 	}
 
-	// Card 取回来应当与直接 Rectify 逐像素相同 —— 这一路上过一次 PNG 编码、
+	// 取回来应当与直接 Rectify 的结果逐像素相同 —— 这一路上过一次 PNG 编码、
 	// 一次 PNG 解码，任何有损环节都会在这里露馅。
 	want, err := capture.Rectify(src, squareQuad(n))
 	if err != nil {
 		t.Fatalf("参照用的 Rectify 失败: %v", err)
 	}
-	cardB64, err := svc.Card(hash)
+	cardB64, err := h.lib.QuestionImage(q.QuestionHash)
 	if err != nil {
-		t.Fatalf("Card 失败: %v", err)
+		t.Fatalf("取题图失败: %v", err)
 	}
 	raw, err := base64.StdEncoding.DecodeString(cardB64)
 	if err != nil {
-		t.Fatalf("Card 回的不是合法 base64: %v", err)
+		t.Fatalf("题图回的不是合法 base64: %v", err)
 	}
 	got, _, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {
-		t.Fatalf("Card 回的 base64 解不出图像: %v", err)
+		t.Fatalf("题图回的 base64 解不出图像: %v", err)
 	}
 	if got.Bounds() != want.Bounds() {
 		t.Fatalf("尺寸不一致: got %v, want %v", got.Bounds(), want.Bounds())
@@ -167,51 +250,67 @@ func TestServiceRectifyThenCardRoundTrip(t *testing.T) {
 // 「两个方向给出不同的结果」，把这层契约钉住，而不是假装我们能报错。
 func TestServiceQuadOrderChangesTheResult(t *testing.T) {
 	const n = 40
-	svc, _ := newService(t)
+	h := newHarness(t)
 	encoded := encodePNG(t, quadrantImage(n))
 
-	forward := squareQuad(n)
-	reversed := reversedSquareQuad(n)
-
-	a, err := svc.Rectify(encoded, forward)
+	a, err := h.svc.Capture(encoded, squareQuad(n))
 	if err != nil {
-		t.Fatalf("正向 Rectify 失败: %v", err)
+		t.Fatalf("正向 Capture 失败: %v", err)
 	}
-	b, err := svc.Rectify(encoded, reversed)
+	b, err := h.svc.Capture(encoded, reversedSquareQuad(n))
 	if err != nil {
 		t.Fatalf("反向的角点不该报错（它是同一个正方形的另一种走法）: %v", err)
 	}
-	if a == b {
+	if a.QuestionHash == b.QuestionHash {
 		t.Error("两种角点顺序给出了同一个 hash —— 顺序没有生效，或图像恰好对称")
 	}
 }
 
-func TestServiceRejectsBadInput(t *testing.T) {
+// 采集失败时，库里不许留下半条记录、盘上也不许留下半张图。
+func TestCaptureRejectsBadInput(t *testing.T) {
 	const n = 40
-	svc, _ := newService(t)
 
-	t.Run("不是 base64", func(t *testing.T) {
-		if _, err := svc.Rectify("这显然不是 base64！！", squareQuad(n)); err == nil {
-			t.Error("非 base64 应当报错")
-		}
-	})
-	t.Run("是 base64 但不是图像", func(t *testing.T) {
-		notAnImage := base64.StdEncoding.EncodeToString([]byte("这不是图片"))
-		if _, err := svc.Rectify(notAnImage, squareQuad(n)); err == nil {
-			t.Error("非图像应当报错")
-		}
-	})
-	t.Run("退化成线的角点", func(t *testing.T) {
-		f := float64(n)
-		flat := capture.Quad{{X: 0, Y: 0}, {X: f, Y: 0}, {X: f, Y: 0}, {X: 0, Y: 0}}
-		if _, err := svc.Rectify(encodePNG(t, quadrantImage(n)), flat); err == nil {
-			t.Error("退化四边形应当报错")
-		}
-	})
-	t.Run("取不存在的 hash", func(t *testing.T) {
-		missing := "0000000000000000000000000000000000000000000000000000000000000000"
-		if _, err := svc.Card(missing); err == nil {
-			t.Error("取不存在的 hash 应当报错")
-		}
-	})
+	cases := []struct {
+		name  string
+		frame string
+		quad  capture.Quad
+	}{
+		{
+			name:  "不是 base64",
+			frame: "这显然不是 base64！！",
+			quad:  squareQuad(n),
+		},
+		{
+			name:  "是 base64 但不是图像",
+			frame: base64.StdEncoding.EncodeToString([]byte("这不是图片")),
+			quad:  squareQuad(n),
+		},
+		{
+			name:  "退化成线的角点",
+			frame: encodePNG(t, quadrantImage(n)),
+			// 四个点连成一条线，围不出可拉正的四边形。
+			quad: capture.Quad{{X: 0, Y: 0}, {X: float64(n), Y: 0}, {X: float64(n), Y: 0}, {X: 0, Y: 0}},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+
+			if _, err := h.svc.Capture(tc.frame, tc.quad); err == nil {
+				t.Fatal("这一次采集应当报错")
+			}
+
+			qs, err := h.lib.List()
+			if err != nil {
+				t.Fatalf("列出错题: %v", err)
+			}
+			if len(qs) != 0 {
+				t.Errorf("失败的采集不该建出错题，库里有 %d 道", len(qs))
+			}
+			if files := h.listCards(t); len(files) != 0 {
+				t.Errorf("失败的采集不该落盘，题图目录里有 %v", files)
+			}
+		})
+	}
 }

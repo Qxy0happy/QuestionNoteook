@@ -30,6 +30,9 @@
   let crop = $state<Box>({ ...DEFAULT_BOX });
   // 入库后按 hash 取回的成品题图（PNG data URL）。
   let cardUrl = $state<string | null>(null);
+  // 已经采集成功、只差把成品取回来显示的题图 hash（null = 这一趟还没采）。
+  // 采集一次成功，题就在库里了，所以重试只能重取图 —— 再采一次会多出一道错题。
+  let savedHash: string | null = null;
   // 交给 Go 的那一趟还没回来。期间锁住三个按钮，免得重复提交。
   let busy = $state(false);
   let errorText = $state('');
@@ -153,6 +156,8 @@
 
     crop = { ...DEFAULT_BOX };
     cardUrl = null;
+    // 新的一张帧：上一次采集留下的那个 hash 与它无关了。
+    savedHash = null;
     frame = canvas;
     frameUrl = canvas.toDataURL('image/jpeg', 0.92);
   }
@@ -230,23 +235,21 @@
         { X: pw, Y: ph }, // 右下
         { X: 0, Y: ph }, // 左下
       ];
-      const hash = await capture.Rectify(base64, quad);
 
-      // 3) 先把成品取回来，**最后才入库**。这个顺序是为了可重入：
-      //    只有最后一步可能失败，此时用户再按一次「确认」是安全的 ——
-      //    Rectify 是内容寻址的，返回同一个 hash，走的是同一条路径。
+      // 3) 一趟做完：拉正 + 按内容 hash 落盘 + 建错题，回来的是**新错题**本身。
+      //    中间没有第二次 IPC，也就没有「题图落了盘、错题没建出来」的空子。
       //
-      //    反过来（Add 成功但取图失败）就会出事：catch 里 frame 不清、busy 已释放，
-      //    用户再按一次「确认」时 Add 会为同一张题图**再建一道错题**，题号翻倍。
-      //
-      //    另：先 Add 并不能避免孤儿文件 —— 题图是 Rectify 内部落盘的，
-      //    走到 Add 这一步时文件早就写下去了，两种顺序的孤儿窗口一样大。
-      const card = await capture.Card(hash);
+      //    它成功那一刻题就已经在库里了，所以这一趟只允许走一次：重试只能重取图，
+      //    再采一次会为同一张题图**再建一道错题**（dfc337e 修的就是这个）。
+      //    重试时选框已经不起作用了 —— 题是按上一次的框定稿的，想改框只能重拍。
+      const hash = savedHash ?? (await capture.Capture(base64, quad)).QuestionHash;
+      savedHash = hash;
 
-      // 4) 入库。答案图还没有，第二个参数传空串（spec：手边没答案也先存题图）。
-      await library.Add(hash, '');
+      // 4) 取回成品题图给界面看。题图的读归题库，采集那边已经没有读路径了。
+      const card = await library.QuestionImage(hash);
 
       cardUrl = `data:image/png;base64,${card}`;
+      savedHash = null;
       // 定稿了：帧与它的显示副本一起丢掉。原图不再保留是刻意的（ADR-0007）。
       frame = null;
       frameUrl = null;
@@ -257,12 +260,15 @@
     }
   }
 
-  // 重拍 / 拍下一张：三条状态一起清掉，回到取景。
+  // 重拍 / 拍下一张：几条状态一起清掉，回到取景。
+  // 注意这不是「撤销」：上一张只要采集成功过，它就已经在题库里了（取图失败也拦不住），
+  // 这里清的只是本页的显示状态。
   function retake() {
     if (busy) return;
     frame = null;
     frameUrl = null;
     cardUrl = null;
+    savedHash = null;
     crop = { ...DEFAULT_BOX };
     errorText = '';
   }

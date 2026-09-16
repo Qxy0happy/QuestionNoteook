@@ -72,6 +72,12 @@ func (s *Store) Save(img image.Image) (Hash, error) {
 	return h, nil
 }
 
+// LoadByHash 按十六进制 hash 文本读回题图。
+//
+// 题库那边的错题记的是 string 型 hash（library.Question.QuestionHash），这一层薄壳
+// 让 *Store 直接满足题库要的读接口 —— 依赖只能有一个方向：采集用题库建错题。
+func (s *Store) LoadByHash(hash string) (image.Image, error) { return s.Load(Hash(hash)) }
+
 // Load 读回某个 hash 对应的题图。
 func (s *Store) Load(h Hash) (image.Image, error) {
 	f, err := os.Open(s.Path(h))

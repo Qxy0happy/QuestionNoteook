@@ -1,6 +1,7 @@
 // Package library 是错题的持久化层：增、删、查。
 //
 // 元数据存 SQLite，图片体积大、存在库外的文件里，库里只记内容 hash（ADR-0004）。
+// 图片的**读**也归这里（spec 的服务划分），只是文件层由外部注入 —— 见 Service.images。
 // 库文件路径由调用方注入（安卓上落在应用私有目录），测试传临时目录即可。
 //
 // 模式（schema）版本记在 SQLite 自带的 PRAGMA user_version 里，Open 时按序号补齐

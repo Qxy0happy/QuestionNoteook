@@ -4,7 +4,6 @@
   // 所以能往前端放的逻辑就别放。
 
   import * as Library from '../bindings/questionbook/internal/library/service';
-  import * as Capture from '../bindings/questionbook/internal/capture/service';
   import type { Question } from '../bindings/questionbook/internal/library/models';
 
   // 三页是同时挂载的，切到这一页才值得拉一次数据。
@@ -67,7 +66,8 @@
 
     try {
       // Card 回来的是 PNG 的 base64，包成 data URL 直接给 img。
-      const base64 = await Capture.Card(q.QuestionHash);
+      // 题图的读现在归题库（票据 15：图片的读与写都在它那一侧）。
+      const base64 = await Library.QuestionImage(q.QuestionHash);
       if (!base64) {
         if (opened?.ID === q.ID) openedError = '这道题的题图不在，可能已被清理';
         return;

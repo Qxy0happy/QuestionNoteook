@@ -4,7 +4,7 @@
 /**
  * Service 是「题库」对前端暴露的那一面。
  * 
- * 和采集那边一样：这一层只做转接，增删查本身在 Store 里，所以不启动 Wails 也能测。
+ * 和采集那边一样：这一层只做转接，增删查与读图本身在 Store 里，所以不启动 Wails 也能测。
  * @module
  */
 
@@ -19,10 +19,20 @@ import * as $models from "./models.js";
 /**
  * Add 落一道新错题，返回落库后的记录（含分配到的 id 与创建时间）。
  * 
- * 两个参数都是题图的内容 hash；answerHash 传空串表示还没拍答案图。
+ * questionHash 是题图的内容 hash；answerHash 是答案图的，传空串表示还没拍。
  */
 export function Add(questionHash: string, answerHash: string): $CancellablePromise<$models.Question> {
     return $Call.ByID(3143855092, questionHash, answerHash);
+}
+
+/**
+ * AnswerImage 按内容 hash 取回答案图，返回 PNG 的 base64。
+ * 
+ * 还没拍答案图的错题，它的 AnswerHash 就是空串 —— 这里明确报出来，
+ * 而不是拿空串去拼一个叫 ".png" 的路径再报一句「打不开」。
+ */
+export function AnswerImage(hash: string): $CancellablePromise<string> {
+    return $Call.ByID(130754020, hash);
 }
 
 /**
@@ -46,4 +56,13 @@ export function Get(id: number): $CancellablePromise<$models.Question> {
  */
 export function List(): $CancellablePromise<$models.Question[] | null> {
     return $Call.ByID(1336294657);
+}
+
+/**
+ * QuestionImage 按内容 hash 取回题图，返回 PNG 的 base64 供界面显示。
+ * 
+ * 读取题图 / 答案图归题库（spec 的服务划分），采集那边不再有读路径。
+ */
+export function QuestionImage(hash: string): $CancellablePromise<string> {
+    return $Call.ByID(2550140058, hash);
 }

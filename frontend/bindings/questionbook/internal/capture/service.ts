@@ -6,6 +6,9 @@
  * 
  * 它只做搬运与编解码：真正的活（透视拉正、按内容 hash 落盘）在 Rectify 与 Store 里。
  * 拆开是为了让那两样能在不启动 Wails 的情况下被测 —— NewService 出来的东西照样能直接调。
+ * 
+ * 依赖只有采集 → 题库这一个方向：采集把拍下的一道题落成错题。所以题图的**读**不在
+ * 这一侧 —— 那是题库的事，前端从 library.Service 取（spec 的服务划分）。
  * @module
  */
 
@@ -15,23 +18,25 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore: Unused imports
+import * as library$0 from "../library/models.js";
+
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore: Unused imports
 import * as $models from "./models.js";
 
 /**
- * Card 按 hash 取回题图，返回 PNG 的 base64 供界面显示。
- * 
- * 一律编成 PNG：题图是**原始像素**，不能再过一次有损编码（spec 的 Out of Scope）。
- */
-export function Card(hash: string): $CancellablePromise<string> {
-    return $Call.ByID(509030524, hash);
-}
-
-/**
- * Rectify 收一张帧（PNG 或 JPEG 的 base64）与四个角点，透视拉正后按内容 hash 落盘，返回该 hash。
+ * Capture 收一张帧（PNG 或 JPEG 的 base64）与四个角点，透视拉正后按内容 hash 落盘，
+ * 并落成一道新错题，返回那道错题。
  * 
  * 角点坐标是**相对传入这张图**的像素坐标，顺序固定为 左上 → 右上 → 右下 → 左下（见 Quad）。
  * 前端应当先按预览可见区裁好再传 —— 传整张传感器画面会白白多走一大截带宽与内存。
+ * 
+ * 「拉正 → 落盘 → 建错题」在这一趟里做完是刻意的：拆成两次调用（先要 hash、再另起一次
+ * 建错题）时，中间任何失败都会留下一张**库未引用的题图**。合起来之后剩下的窗口只有
+ * 「图已落盘、写库失败」这一小段（票据 15 的 Comments 里记了它还剩多大）。
+ * 
+ * 答案图还没有就传空串：手边没有答案时也先把题图存下来，拍摄流不该被打断。
  */
-export function Rectify(frameBase64: string, quad: $models.Quad): $CancellablePromise<string> {
-    return $Call.ByID(1263547862, frameBase64, quad);
+export function Capture(frameBase64: string, quad: $models.Quad): $CancellablePromise<library$0.Question> {
+    return $Call.ByID(2146388044, frameBase64, quad);
 }
