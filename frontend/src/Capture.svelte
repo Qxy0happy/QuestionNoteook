@@ -104,7 +104,7 @@
     let disposed = false;
     navigator.mediaDevices
       // 必须显式要分辨率。不给约束时 WebView 会挑个默认档（常见 640×480），
-      // 而预览是 cover 裁过的，再经选框一裁，成品就只剩两三百像素宽 —— 字都看不清。
+      // 再经选框一裁，成品就只剩两三百像素宽 —— 印刷题目的字就糊了。
       // 用 ideal 而不是 exact：请求不到理想值也要拿到次好的，别把整条路堵死。
       .getUserMedia({
         video: {
@@ -151,34 +151,26 @@
     clearShot();
   });
 
-  // 快门：按预览的 cover 裁出可见区域，再按**源像素密度**落到 canvas 上。
-  // 不裁切会让预览与成片视野不一致（竖屏看的是窄带，拍下来却是一整张横画幅），
-  // 而那个不一致正好毁掉取景框的对准意义。不降采样则是因为下游要读手写题。
+  // 快门：整帧按**源像素密度**搬到 canvas 上 —— 不裁、不降采样。
+  //
+  // 不裁是因为预览已经是 contain 了：屏幕上看到的就是整帧，拍下来自然也该是整帧，
+  // 两边视野一致，取景框才对得准。裁哪一块是下一步选框的事，与快门无关。
+  // 不降采样是因为下游要读印刷题目的字。
   function shutter() {
     const el = video;
     if (!el || el.videoWidth === 0) return;
 
     const vw = el.videoWidth;
     const vh = el.videoHeight;
-    // 每次按下现算，所以窗口尺寸变了自然跟着变，不需要缓存或 resize 监听。
-    const box = el.getBoundingClientRect();
-    if (box.width === 0 || box.height === 0) return;
-
-    // object-fit: cover 的逆运算：s = max(cw/vw, ch/vh)，可见源区域居中。
-    const s = Math.max(box.width / vw, box.height / vh);
-    const w = Math.round(box.width / s);
-    const h = Math.round(box.height / s);
-    const sx = Math.round((vw - w) / 2);
-    const sy = Math.round((vh - h) / 2);
 
     const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
+    canvas.width = vw;
+    canvas.height = vh;
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
     // 源矩形与目标同尺寸 —— 逐像素搬运，不重采样。
-    ctx.drawImage(el, sx, sy, w, h, 0, 0, w, h);
+    ctx.drawImage(el, 0, 0, vw, vh, 0, 0, vw, vh);
 
     crop = { ...DEFAULT_BOX };
     cardUrl = null;
@@ -393,8 +385,11 @@
     display: block;
     width: 100%;
     height: 100%;
-    /* 预览铺满整页；取景框只是压在上面的辅助线。 */
-    object-fit: cover;
+    /* contain，不是 cover：整帧都要看得见。
+       cover 会把横画幅的相机流塞进竖屏，只露出中间一条竖窄带（放大到比例失真），
+       而快门之后那张静态帧走的是 contain —— 取景看到的和拍下来的不是同一块，
+       取景框就对不准任何东西了。留白由 .capture 的黑底兜住。 */
+    object-fit: contain;
   }
 
   /* 固定居中：不随画面内容移动，也不随手指拖动。 */
@@ -403,9 +398,11 @@
     top: 50%;
     left: 50%;
     translate: -50% -50%;
-    /* 三个约束取最小，窄屏、宽屏、矮窗都不会溢出；比例始终 3:4。 */
-    width: min(72vw, 26rem, 46vh);
-    aspect-ratio: 3 / 4;
+    /* 横画幅（长边是水平边）—— 相机流是横的，取景框就得跟着横过来，
+       否则它在屏幕上框的那一块和实际拍下来的根本不是同一个形状。
+       相机流没有元数据能提前读到，4:3 是所有手机后摄的通行档，用它的比例就够。 */
+    width: min(72vw, 26rem);
+    aspect-ratio: 4 / 3;
     border: 2px solid rgba(255, 255, 255, 0.9);
     border-radius: 1rem;
     /* 内一圈暗描边：亮场景下白框也不会糊掉。 */
