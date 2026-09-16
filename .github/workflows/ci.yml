@@ -37,6 +37,15 @@ jobs:
       # （真那份由前端作业与 Android 作业各自去构建）。没有任何 Go 测试读它。
       - run: mkdir -p frontend/dist && printf '<!doctype html>\n' > frontend/dist/index.html
 
+      # 这个应用的**桌面后端**在 Linux 上走 GTK4/WebKit，所以 `go build ./...` 会去问
+      # pkg-config 要 gtk4 / webkitgtk-6.0 / glib —— 没装就会是
+      # "Package gtk4 was not found in the pkg-config search path"。
+      # Windows 上不需要这些（本地一直是绿的），所以这一条只有 Linux 才补。
+      - name: 装 Linux 桌面后端要的开发包
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev
+
       - run: go build ./...
       - run: go vet ./...
 
@@ -136,10 +145,20 @@ jobs:
 
       # 不用 android-actions/setup-android：它内部那句 sdkmanager 在这些 runner 上
       # 会因为「找不到 tools 包」直接失败（那个包在新版 SDK 仓库里已经没有了，第一次
-      # 跑就是这么红的）。ubuntu 镜像里本来就装好了 Android SDK，sdkmanager 就在 PATH 上。
+      # 跑就是这么红的）。ubuntu 镜像里本来就装好了 Android SDK，只是 cmdline-tools
+      # 那个 bin **不在 PATH 上**（第二次跑：`sdkmanager: command not found`），
+      # 所以按目录找它 —— 目录名是版本号，各镜像不一样（latest / 16.0 / …）。
       # NDK 的版本写死：Taskfile 挑的是「装得最新的那个」，CI 上装几个就会挑错。
       - name: 装 NDK 与 platform
         run: |
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          bin=$(ls -d "$SDK"/cmdline-tools/*/bin 2>/dev/null | tail -1)
+          if [ -z "$bin" ]; then
+            echo "找不到 cmdline-tools，$SDK 下有什么："
+            ls "$SDK" || true
+            exit 1
+          fi
+          export PATH="$bin:$PATH"
           sdkmanager --version
           yes | sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973"
       - uses: pnpm/action-setup@v4
