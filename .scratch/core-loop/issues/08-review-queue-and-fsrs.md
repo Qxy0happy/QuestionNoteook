@@ -90,6 +90,50 @@ func endOfToday(now time.Time) time.Time {
    本模块的版本行。本机工具链是 go1.27.1，`build`/`vet`/`test` 全过。
    顺带：票据原先以为 `go-fsrs/v4` 「已在 go.mod 里」，其实不在，是这次 `go get` 进来的。
 
+### FSRS 接线审计（2026-09-16，用户问「你确定是完好实现了吗」）
+
+**做法：去看库的源码 + 在运行时断言，不信我自己写的注释。** 结论分两半。
+
+**对的这一半（现在有测试钉住了）**：
+
+- 库**确实是 FSRS-6**：`weights.go` 原文写着 *"Weights holds the **21 FSRS v6 weight parameters**"*，
+  `DefaultWeights()` 是 v6 的默认向量。ADR-0002 那条说法站得住。
+- 四档的数值与库里**逐位相同**：`Again=1 / Hard=2 / Good=3 / Easy=4`。
+- `DefaultParam()` 的默认：`RequestRetention 0.9`、`MaximumInterval 36500`、`EnableFuzz false`、
+  `EnableShortTerm true`。
+- **`params_test.go` 把它钉死了**（三条）：
+  1. `TestSchedulerDeviatesFromDefaultsInExactlyOnePlace` —— 逐字段与官方默认比，
+     **只允许一处偏离**（就是学习步关掉）。它防的是一类**静默**的坏：库升级之后默认权重/保留率
+     悄悄变了、间隔整体变了，而没有东西会红。要再偏离一处，得先改这条测试。
+  2. `TestFourRatingsAreStrictlyOrderedAndAtLeastOneDay` —— 四档**严格递增**，
+     且最短的一档也**至少一天**（那是「评过的题本次不再出现」的结构保证的落点）。
+  3. `TestDueIsTheIntervalAwayFromTheReviewMoment` —— `Due` 是**复习那一刻 + N 天**的绝对时刻，
+     并双向断言它与「按本地日取」是自洽的：复习**当天**不在队列里、**第 N 天**在队列里。
+
+实测（按时复习，时钟跟着到期走）：
+
+```
+新卡：                 Again  1 天 / Hard   2 天 / Good   3 天 / Easy   8 天
+复习过三次的卡：       Again  3 天 / Hard 141 天 / Good 196 天 / Easy 318 天
+```
+
+**顺带发现的两件事**（都不是 bug，是**要你决定**的）：
+
+1. **模糊化（fuzz）是关的** —— 这是官方库的默认，我们没打开。后果：**同一批评级的题会永远落在同一天到期**
+   （今天拍的一批题都评 Good，196 天后同一天全到期）。打开之后间隔会散开几个百分点，复习量就不会一阵一阵的。
+2. **间隔会长到几年** —— 复习四次 Easy 是 **1875 天（5 年）**。这不是算错了（FSRS 就是这么算的），
+   但考研是 6–12 个月的尺度，那等于「再也不出现」。想让它更密就把 `RequestRetention` 从 0.9 往上调
+   （0.95 会明显缩短间隔）。
+
+**库做得对的一处，值得记下来**：它会拒绝「上次复习在将来」的卡
+（`fsrs: last review date … is after current time`）。也就是说**设备时钟被往回调**时，
+评级会以一个诚实的错失败，而不是把状态写坏。
+
+**我自己在这次审计里也错了一次**：那三条测试的第一版，「复习过的卡」那个用例是在**同一个时刻**
+连喂三次 —— 那是**不现实**的，而且它打出来的数字会误导人：`elapsedDays=0` 时遗忘曲线在 R=1，
+而 `exp((1-R)·w10) - 1` 恰好等于 0，于是稳定度的增长项为零、四档一直停在 1/2/3/4。
+改成**每次把时钟推到到期那一刻**之后，数字才有意义（就是上面那张表）。
+
 ### 未验证
 
 - **真机上的整条复习链路**（界面上评一下 → 库里的行变了）。
