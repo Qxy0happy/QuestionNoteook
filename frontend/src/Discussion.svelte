@@ -14,6 +14,7 @@
 
   import { onMount } from 'svelte';
   import * as Discussion from '../bindings/questionbook/internal/discussion/service';
+  import Markdown from './Markdown.svelte';
 
   // 只用到这四个字段，所以不从生成的 bindings 里 import 模型类型（与 Tagging.svelte 同一个
   // 做法）：形状对得上就够。Role 在这儿当普通字符串看 —— Wails 给 Go 的具名字符串类型生成的
@@ -151,14 +152,15 @@
 
           {#each messages as m (m.ID)}
             <div class="line" class:mine={m.Role === 'user'}>
-              <div class="bubble">{m.Text}</div>
+              <!-- 两边都过 markdown + KaTeX：模型几乎必然吐公式，而用户自己也可能写 LaTeX。 -->
+              <div class="bubble"><Markdown text={m.Text} /></div>
               <time class="at">{timeText(m.CreatedAt)}</time>
             </div>
           {/each}
 
           {#if pending}
             <div class="line mine">
-              <div class="bubble">{pending}</div>
+              <div class="bubble"><Markdown text={pending} /></div>
             </div>
           {/if}
 

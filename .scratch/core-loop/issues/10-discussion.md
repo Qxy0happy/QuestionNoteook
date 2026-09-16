@@ -98,6 +98,38 @@ func (s *Service) Ask(questionID int64, history []Message) (Reply, error)
 功能上无害——记库的是讨论服务，绕过它去调只会得到一次不落库的问答——但它是多出来的面。
 要收掉得看 Wails 有没有排除单个方法的办法，本票没做。
 
+### 渲染：markdown + KaTeX（接线时补的，票据原先完全没提）
+
+**这是 spec 阶段的一个缺口，不是"没要求所以没做"。** 票据只写了「继续自由聊」，没写模型吐回来的字怎么显示。
+后果很具体：模型回答数学题几乎必然带 LaTeX，而 markdown 是这类模型默认的输出格式 ——
+在补这个之前，讨论里看到的是 `$\frac{a}{b}$` 和 `**重点**` 的原样字符。
+
+`frontend/src/Markdown.svelte`：marked + marked-katex-extension + KaTeX + DOMPurify。
+**任何以后要显示模型文字的地方都该用它**（票 11 的待批准层就是下一处）。
+
+几个不显然的点：
+
+- **先 markdown、再消毒**，顺序不能反。marked 会原样放行输入里的 HTML（官方明确说消毒不是它的事），
+  链接还能带 `javascript:`，而模型输出是**不可信**的 —— 题图里完全可能藏着让它输出 `<script>` 的文字，
+  而这个 WebView 里有 JS 桥（能调到应用自己的服务）。所以进 `{@html}` 的每个字节都先过 DOMPurify。
+- **`nonStandard: true`**：默认那档要求公式结尾的 `$` 后面跟空白或标点，而中文正文常常不写空格
+  （`$x^2$的最小值`），公式会被当纯文本漏掉 —— 那正好是这个组件要解决的问题没解决。
+- **`FORBID_TAGS` 里两条是实测出来的，不是照抄文档**（把整条链在 Node 里配 jsdom 真跑了一遍）：
+  1. **DOMPurify 默认放行 `<style>` 元素** —— 实测 `<style>body{display:none}</style>` 原样活下来。
+     样式是全局的，模型一句话就能把整个应用改样；更阴的是 CSS 能用属性选择器把值拼进 `url()`，
+     一位一位读走 —— 而**设置页那个 API Key 输入框的 value 正好落在这个射程里**。禁元素。
+     但行内 `style` **属性必须留着**（也实测过）：KaTeX 的间距与垂直对齐全靠它，禁掉公式就散架。
+     这两件事同名不同物。
+  2. 表单类（`form`/`input`/`button`…）默认也放行 —— `<form action="https://…">` 能把这个 WebView
+     导到别的页面去伪装成应用。一并禁掉。
+  3. 顺带：MathML 里的 `<annotation>`（TeX 原文）默认被当陌生标签摘掉，用 `ADD_TAGS` 补回来了 ——
+     摘了不花屏，但读屏与「复制成 MathML」就没东西可用。
+- 未解析成功的公式**不抛**（`throwOnError: false`）：模型偶尔吐半截 `\left(`，抛出去整条消息就没了；
+  标红显示原文至少看得见。`trust: false` 禁掉 `\href` / `\htmlClass` 这类能带出 URL 或属性的命令。
+
+**代价**：JS 包从 81.5 kB 涨到 **437 kB**（gzip 139 kB），KaTeX 还带进约 1.5 MB 字体
+（`.woff` 与 `.ttf` 各产了一份）。都进了 APK。要瘦身可以在构建时只保留 woff2 并做子集化，本票没做。
+
 ### 未验证
 
 - **一次真实的 VLM 问答都没有发生过。** `discussPrompt` 是暂定的，措辞没在真实题目上试过。
