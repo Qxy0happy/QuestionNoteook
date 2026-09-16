@@ -210,14 +210,31 @@ Wails v3 里 `application.NewService(&X{})` 的 `X` 就是一个普通 Go struct
 
 ### 脚手架补丁
 
-`build/android/` 下有若干对 Wails 脚手架的改动（Windows 宿主分支、`sort -V` 静默失败、`gradlew.bat`、AGP 9.2.0、Gradle 9.7.1、镜像地址、应用身份）。**升级 Wails 或重新 init 会覆盖它们**，理由已写在文件注释里。
+对 Wails 脚手架的改动分散在两处，**升级 Wails 或重新 init 都会覆盖它们**，理由已写在各自的文件注释里：
 
-### 已知未验证项
+- `build/android/Taskfile.yml` —— Windows 宿主分支、`sort -V` 静默失败、`gradlew.bat`、`-x` 判据、反斜杠路径、去掉 `awk` 依赖
+- `build/android/build.gradle` + Gradle wrapper —— AGP 9.2.0、Gradle 9.7.1、腾讯云镜像
+- `build/android/app/build.gradle` + `strings.xml` —— 应用身份（applicationId 与显示名）
+- `build/android/app/src/main/java/com/wails/app/MainActivity.java` —— **补 `WebChromeClient`**。出厂脚手架整个包里一个都没有，于是 `getUserMedia` 一律被拒；另外补了 console → logcat 的转发
+- `build/ios/app_options_default.go` —— **删除**。它的 `!ios` 标签会让其它平台的 `go build ./...` 失败（详见该次提交）
 
-- **手写题的识别准确率**。所用视觉模型公开的文档问答跑分是印刷体的，而考研错题多半是老师手写的。**这是本项目最大的未知数**，应当尽早用真实照片验一次，别等到 tag 功能写完
-- **`wails3 task android:run:device` 这条真机部署路径从没跑过**。它的 `ADB` 变量有与 NDK 那处同类的 Unix 路径回退问题
-- 安卓 WebView 的相机链路用户已自行验证可用，不计入风险
+### 已知未验证项（2026-09-16 修订）
+
+上一版这里三条**全部过时**，逐条更正：
+
+- ~~手写题的识别准确率~~ —— **前提本身是错的**。错题的**题目是印刷的**，用户拍的是习题册 / 真题上的印刷题面；手写只出现在用户自己的解答上，而那不进 VLM。所用模型的公开跑分本来就是印刷体文档问答 —— 那正是本场景，不是不利条件。要验的是**标签质量**，见票据 01
+- ~~`run:device` 从没跑过~~ —— **已跑通**，真机上完成过构建 / 安装 / 启动，过程中修掉了四处 Unix 假设与一个数据目录问题
+- ~~相机链路不计入风险~~ —— **不能这么算**。出厂脚手架里没有 `WebChromeClient`，`getUserMedia` 一律被拒（实测症状：取景页显示 "Permission denied"）。补丁已打，但这属于「上游没有、我们补的」
+
+**当前真实的未验证项：**
+
+- **打标签的标签质量** —— 不是"能不能读"，是"给的分层标签合不合用、prompt 怎么调"（票据 01）
+- **成品卡片图的分辨率** —— 首次实测 249×172 px，用户判断当前可接受；已加 `getUserMedia` 分辨率约束，**未复测**
+- **失败路径一次都没走过** —— 断网、VLM 报错、磁盘写满，全都没在真机上试过
+- **`confirm()` 的可重入修复未复测** —— 要复现得让 `capture.Card` 失败，不好造（修复见 `dfc337e`）
 
 ### 待办顺带
 
 - `.gitignore` 与 `.gitattributes` 已就位；首次提交是 `2537272`
+- 票 04 的选框是**轴对齐矩形**（用户明确决定），所以 `capture.Rectify` 在今天这条路径上是一次**几何恒等变换**。ADR-0006 里「透视矫正不是可选项而是必需」那句与这个前提不符，**待改口**
+
