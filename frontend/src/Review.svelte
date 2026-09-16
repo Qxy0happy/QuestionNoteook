@@ -333,7 +333,8 @@
     display: flex;
     flex-direction: column;
     gap: 0.6rem;
-    padding: 0.6rem 1rem max(0.75rem, env(safe-area-inset-bottom));
+    /* 底部安全区归导航栏（它在最下面），这里只留自己的间距。 */
+    padding: 0.6rem 1rem 0.75rem;
     border-top: 1px solid rgba(244, 246, 251, 0.1);
   }
 

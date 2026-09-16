@@ -455,7 +455,8 @@
   .shutter {
     position: absolute;
     left: 50%;
-    bottom: max(1.75rem, env(safe-area-inset-bottom));
+    /* 手势条那一条现在由底部导航栏留出来（它才是贴底的那个），这里只要一点呼吸的缝。 */
+    bottom: 1.25rem;
     translate: -50% 0;
     width: 4.5rem;
     height: 4.5rem;
@@ -505,8 +506,9 @@
   .mode {
     position: absolute;
     left: 50%;
-    /* 快门 4.5rem 高、离底 1.75rem，这里再往上让一格。 */
-    bottom: calc(max(1.75rem, env(safe-area-inset-bottom)) + 5.5rem);
+    /* 快门 4.5rem 高、离底 1.25rem，这里再往上让一格。
+       手势条那一条由底部导航栏负责，这里不再算一遍（算了就是双份空白）。 */
+    bottom: calc(1.25rem + 5.5rem);
     translate: -50% 0;
     margin: 0;
     padding: 0.35rem 0.9rem;
@@ -533,7 +535,8 @@
   .tools {
     position: absolute;
     left: 50%;
-    bottom: max(1.5rem, env(safe-area-inset-bottom));
+    /* 同上：底部那一条安全区归导航栏，这里只要自己的间距。 */
+    bottom: 1.5rem;
     translate: -50% 0;
     /* 整行定宽、三格均分：确认在忙碌时换文案，按钮和整行都不跟着抽一下。 */
     width: min(calc(100% - 2rem), 24rem);

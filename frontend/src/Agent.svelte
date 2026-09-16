@@ -87,7 +87,7 @@
 
 <div class="agent" bind:this={root}>
   <header class="bar">
-    <span class="bar-title">Agent</span>
+    <span class="bar-title">设置</span>
     {#if view}
       <span class="state" class:ok={view.Configured}>
         {view.Configured ? '已配置' : '未配置'}
@@ -116,15 +116,27 @@
 
       <label>
         <span>接口地址</span>
-        <input bind:value={patch.base_url} placeholder="https://api.deepseek.com" />
+        <input
+          bind:value={patch.base_url}
+          type="text"
+          autocapitalize="none"
+          autocorrect="off"
+          spellcheck="false"
+          placeholder="https://api.deepseek.com"
+        />
       </label>
 
       <label>
         <span>API Key</span>
+        <!-- 明文而不是 password：安卓上 password 会唤出**安全键盘**，它不让粘贴、也没有候选词，
+             敲一串几十个字符的 key 非常折磨。这一页本来就是应用私有的界面，省事更要紧。 -->
         <input
           bind:value={patch.api_key}
-          type="password"
+          type="text"
           autocomplete="off"
+          autocapitalize="none"
+          autocorrect="off"
+          spellcheck="false"
           placeholder={view?.APIKeySet
             ? `已设置（${view.APIKeyLength} 字符），留空表示不改`
             : '还没设'}
@@ -133,12 +145,26 @@
 
       <label>
         <span>视觉模型</span>
-        <input bind:value={patch.vision_model} placeholder="看服务方的文档，别照抄这里" />
+        <input
+          bind:value={patch.vision_model}
+          type="text"
+          autocapitalize="none"
+          autocorrect="off"
+          spellcheck="false"
+          placeholder="看服务方的文档，别照抄这里"
+        />
       </label>
 
       <label>
         <span>文本模型<span class="opt">选填</span></span>
-        <input bind:value={patch.text_model} placeholder="只有纯文本的活才用它" />
+        <input
+          bind:value={patch.text_model}
+          type="text"
+          autocapitalize="none"
+          autocorrect="off"
+          spellcheck="false"
+          placeholder="只有纯文本的活才用它"
+        />
       </label>
 
       <label>
@@ -253,11 +279,9 @@
     font-size: 0.9rem;
     --wails-draggable: no-drag;
   }
-  /* 地址与模型名都是机器读的串，别让 WebView 顺手首字母大写或纠错。 */
-  input {
-    -webkit-autocapitalize: none;
-    text-transform: none;
-  }
+  /* 地址、模型名、key 都是机器读的串，别让键盘顺手改。三个属性写在每个 input 上
+     （HTML 属性没法在这儿统一给）—— 尤其 autocapitalize：安卓默认会把首字母大写，
+     那会直接把 https:// 敲成 Https://。 */
   input::placeholder,
   textarea::placeholder {
     color: rgba(244, 246, 251, 0.3);
