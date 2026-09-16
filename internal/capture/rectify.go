@@ -210,6 +210,12 @@ func round8(v float64) uint8 {
 	}
 }
 
+// clampInt 把 v 收进 [lo, hi]。
+//
+// 前端那两个 clamp（Capture.svelte / CropBox.svelte）与它做的是同一件事，但隔着语言边界，
+// 不可能共享 —— 所以这里留着第三份是**刻意的**，不是漏改：它只服务下面双线性采样的
+// 下标夹取（越界外推那两行），为一个三行的函数开一个共享包、或者把夹取摊到调用处，
+// 都比这三行本身贵。名字在这里也是准的：参数确实是像素下标。
 func clampInt(v, lo, hi int) int {
 	switch {
 	case v < lo:

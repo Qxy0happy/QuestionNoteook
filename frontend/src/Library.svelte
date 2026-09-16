@@ -7,8 +7,11 @@
   import type { Question } from '../bindings/questionbook/internal/library/models';
   import * as Tags from '../bindings/questionbook/internal/tags/service';
   import type { Tag } from '../bindings/questionbook/internal/tags/models';
+  import * as VLM from '../bindings/questionbook/internal/vlm/service';
+  import type { ProposedTag } from '../bindings/questionbook/internal/vlm/models';
   import AnswerBadge from './AnswerBadge.svelte';
   import TagFilter from './TagFilter.svelte';
+  import Tagging from './Tagging.svelte';
 
   // 三页是同时挂载的，切到这一页才值得拉一次数据。
   // 题库页发起的「补拍答案图」：把这道题交给上层（App），由它切到取景页并进入补拍模式。
@@ -43,6 +46,17 @@
   let newSubject = $state('');
   // 标签相关的失败都归这儿：建学科没成、打标签没写进去。
   let tagError = $state('');
+
+  // ── VLM 打标签（票据 09）──
+  // 识别是**主动触发**且**只读**的：结果先给用户改，保存那一步才写库。
+  // 所以这些状态与上面那份「已经挂在题上的标签」分开存 —— 建议没保存之前不算数。
+  let showTagging = $state(false);
+  let vlmBusy = $state(false);
+  let vlmError = $state('');
+  let suggested = $state<ProposedTag[] | null>(null);
+  // 调用成功但结果不能用：模型没按格式回、或一条都没给。它带着原话一起回来（票据 01 靠它调 prompt）。
+  let vlmProblem = $state('');
+  let vlmRaw = $state('');
 
   // 同一个转换在下面出现好几处，收成一个 —— 都是要把 unknown 变成能给用户看的一句话。
   function errorMessage(err: unknown): string {
@@ -167,6 +181,7 @@
 
   function toggleTags() {
     showTags = !showTags;
+    showTagging = false; // 两块面板抢同一格
     tagError = '';
   }
 
@@ -189,6 +204,53 @@
     }
   }
 
+  // ── 识别标签 ──
+
+  async function startTagging() {
+    const q = opened;
+    if (!q || vlmBusy) return;
+    showTags = false; // 两块面板抢同一格，一次只开一个
+    showTagging = true;
+    vlmBusy = true;
+    vlmError = '';
+    try {
+      // 识别只读，随便重试都不留痕迹。
+      const s = await VLM.SuggestTags(q.ID);
+      // 这中间用户可能已经返回或换了一道题 —— 别把旧题的建议贴上去。
+      if (opened?.ID !== q.ID) return;
+      suggested = s.Tags;
+      vlmProblem = s.Problem;
+      vlmRaw = s.Raw;
+    } catch (err) {
+      if (opened?.ID === q.ID) vlmError = errorMessage(err);
+    } finally {
+      vlmBusy = false;
+    }
+  }
+
+  function closeTagging() {
+    showTagging = false;
+    suggested = null;
+    vlmProblem = '';
+    vlmRaw = '';
+    vlmError = '';
+  }
+
+  // 保存才写库。整条路径（学科+章节+知识点）由 Go 侧建或复用，回来的是这道题最终挂着的标签，
+  // 所以这里重读一次而不是把建议直接当成结果 —— 目录里已有的同名标签会被复用，不是新建。
+  async function saveSuggested(tags: ProposedTag[]) {
+    const q = opened;
+    if (!q) return;
+    try {
+      await VLM.SaveTags(q.ID, tags);
+      closeTagging();
+      tagError = '';
+      await loadTags(q.ID);
+    } catch (err) {
+      vlmError = errorMessage(err);
+    }
+  }
+
   function close() {
     opened = null;
     openedUrl = null;
@@ -198,6 +260,7 @@
     showTags = false;
     openedTagIDs = [];
     tagError = '';
+    closeTagging();
   }
 
   function startConfirm() {
@@ -267,6 +330,10 @@
       <button class="ghost" class:on={openedTagIDs.length > 0} onclick={toggleTags}>
         标签{openedTagIDs.length > 0 ? ` ${openedTagIDs.length}` : ''}
       </button>
+      <!-- 识别是主动触发的：不自动跑，用户想要才花这一次调用。 -->
+      <button class="ghost" onclick={startTagging} disabled={vlmBusy}>
+        {vlmBusy ? '识别中…' : '识别标签'}
+      </button>
     </div>
 
     {#if actionError}
@@ -290,6 +357,23 @@
       <!-- 面板跟题图并排存在：打标签的时候得看得见题，否则等于闭着眼睛分类。 -->
       <div class="panel">
         <TagFilter tags={allTags} selected={openedTagIDs} onSelect={saveTags} />
+      </div>
+    {/if}
+
+    {#if showTagging}
+      <!-- 同样是并排：判断模型给的标签对不对，得对着题看。 -->
+      <div class="panel">
+        <Tagging
+          suggestion={suggested}
+          busy={vlmBusy}
+          error={vlmError}
+          problem={vlmProblem}
+          raw={vlmRaw}
+          vocabulary={allTags}
+          onSave={saveSuggested}
+          onRetry={startTagging}
+          onCancel={closeTagging}
+        />
       </div>
     {/if}
   {:else}
@@ -442,9 +526,10 @@
   }
   /* 「有答案图 / 缺答案图」那一小条的样式跟着 AnswerBadge 走，这里不再留一份。 */
 
-  /* 顶栏下面那行动作（补拍答案图 / 标签）。 */
+  /* 顶栏下面那行动作（补拍答案图 / 标签 / 识别标签）。窄屏上放不下就换行，别把字挤没。 */
   .actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 0.5rem;
     padding: 0.6rem 1rem 0;
   }

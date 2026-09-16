@@ -4,6 +4,18 @@
   // 用帧坐标而不是屏幕坐标有两个好处：帧在屏幕上缩放了多少、有没有留黑边，
   // 都不必进状态；旋转底图时选框也能跟着内容一起转（见 Capture.svelte 的 rotate）。
   export type Box = { x: number; y: number; w: number; h: number };
+
+  // 把 v 收进 [lo, hi]。
+  //
+  // 放这里跟着 Box 一起导出，是因为 Capture.svelte 那侧也要**同一个动作**：把归一化的选框
+  // 换算成像素下标时，四舍五入会把右边推到帧外一两个像素，得夹回来。两份逐字相同的实现
+  // 没有理由各留一份，而这两个文件已经靠 Box 共享同一套几何了。
+  //
+  // 注意它同时吃小数与整数 —— 两边传的其实都是 number（归一化的比例、以及取整后的下标），
+  // 所以不必像以前那样在 Capture 那边叫 clampInt，那名字反而说错了。
+  export function clamp(v: number, lo: number, hi: number): number {
+    return v < lo ? lo : v > hi ? hi : v;
+  }
 </script>
 
 <script lang="ts">
@@ -52,9 +64,8 @@
     height: value.h * rect.height,
   });
 
-  function clamp(v: number, lo: number, hi: number): number {
-    return v < lo ? lo : v > hi ? hi : v;
-  }
+  // clamp 在 module 段里（那里跟着 Box 导出，Capture.svelte 也要它）——
+  // 实例段与 module 段编译在同一个模块作用域里，这里直接就能用，别再抄一份。
 
   function begin(e: PointerEvent, kind: Kind) {
     // 尺寸还没量出来（首帧）时 rect 是零宽，除下去全是 NaN，干脆不动。

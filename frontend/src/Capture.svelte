@@ -9,7 +9,9 @@
   import * as library from '../bindings/questionbook/internal/library/service.js';
   import type { Quad } from '../bindings/questionbook/internal/capture/models.js';
   import type { Question } from '../bindings/questionbook/internal/library/models.js';
-  import CropBox, { type Box } from './CropBox.svelte';
+  // clamp 从 CropBox 那边拿：选框的手势计算与本页的像素换算要的是同一个动作，
+  // 两份逐字相同的实现没有理由各留一份（它跟着 Box 一起导出，见那里的注释）。
+  import CropBox, { clamp, type Box } from './CropBox.svelte';
 
   interface Props {
     // 补拍答案图：传那道**已有的**错题的 id。不传（null）就是拍一道新错题 —— 本页的常态。
@@ -230,10 +232,6 @@
     crop = { x: 1 - (crop.y + crop.h), y: crop.x, w: crop.h, h: crop.w };
   }
 
-  function clampInt(v: number, lo: number, hi: number): number {
-    return v < lo ? lo : v > hi ? hi : v;
-  }
-
   // 确认框选。到这一步就定稿：帧被丢掉，框歪了只能重拍。
   async function confirm() {
     const src = frame;
@@ -245,10 +243,10 @@
       // 1) 按选框在**无损帧**上裁子图。归一化 → 像素先在同步段里定下来：
       //    后面 await 会让出线程，那时用户再拖选框也不该改变这一次提交的内容。
       //    夹一次边界：四舍五入可能把右边推到帧外一个像素。
-      const px = clampInt(Math.round(crop.x * src.width), 0, src.width - 1);
-      const py = clampInt(Math.round(crop.y * src.height), 0, src.height - 1);
-      const pw = clampInt(Math.round(crop.w * src.width), 1, src.width - px);
-      const ph = clampInt(Math.round(crop.h * src.height), 1, src.height - py);
+      const px = clamp(Math.round(crop.x * src.width), 0, src.width - 1);
+      const py = clamp(Math.round(crop.y * src.height), 0, src.height - 1);
+      const pw = clamp(Math.round(crop.w * src.width), 1, src.width - px);
+      const ph = clamp(Math.round(crop.h * src.height), 1, src.height - py);
 
       const cut = document.createElement('canvas');
       cut.width = pw;

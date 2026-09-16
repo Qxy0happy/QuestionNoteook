@@ -10,6 +10,12 @@
 // 同一个库文件上还有别的表（标签是头一张），它们的读写代码在各自的包里
 // （internal/tags），只有迁移与「按标签筛错题」这条查询留在这里 ——
 // 前者是因为这个库只有一套迁移机制，后者是因为它要读 questions 表。
+//
+// 内容 hash 在这一层是**裸 string**，不是具名类型（票据 16 记的那条 Primitive Obsession）。
+// 判定留着：具名的那一个在采集侧（capture.Hash），而题库不能 import 采集 —— 依赖只有
+// 采集 → 题库一个方向。在这条边界上再立第三个 hash 类型换不来任何安全：两端看到的本来
+// 就是文本（SQLite 的 TEXT 列、前端收到的字符串），只会让 main.go 的适配壳与
+// capture.Store.LoadByHash 各多出一圈转换，而要动它就得三处一起动。
 package library
 
 import (
@@ -30,6 +36,12 @@ const (
 	driverName = "sqlite"
 
 	// MemoryPath 传给 Open 时建一个进程内的库，进程退出即消失。
+	//
+	// 票据 16 把它记成「机会性的规格化过度」—— 全仓只有 TestOpenMemoryPath 用它。
+	// 判定留着：删它就得连那条测试一起删（它是唯一的调用方），等于拿「少一条覆盖」
+	// 换「少五行代码」；而 Open 里随它而来的 SetMaxOpenConns(1) 也不是可顺手删的装饰 ——
+	// 内存库跟着连接走，池里再开一条就等于换了个空库。真有人用了（或真没人用且
+	// 那条测试也删了），这两处一起再议。
 	MemoryPath = ":memory:"
 )
 

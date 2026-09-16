@@ -830,9 +830,15 @@ func TestUpgradeFromOlderSchema(t *testing.T) {
 
 	// 把库退回票据 05 的形状：标签表还没建、版本号停在 1。
 	// 这是测试在**扮演**一个老库文件，不是绕过服务层的实现细节。
+	//
+	// 每加一条新迁移，这里就要把那条迁移建的**表**也删掉（像下面 review 那两张）：
+	// 退回的是「那个年代真实存在过的库」，而不是「只少了标签表的库」。漏掉的话，
+	// 重开时那条迁移会撞上已经存在的表。
 	for _, stmt := range []string{
 		`DROP TABLE question_tags`,
 		`DROP TABLE tags`,
+		`DROP TABLE review_logs`,
+		`DROP TABLE review_states`,
 		`PRAGMA user_version = 1`,
 	} {
 		if _, err := lib.DB().Exec(stmt); err != nil {

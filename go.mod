@@ -1,8 +1,9 @@
 module questionbook
 
-go 1.25.0
+go 1.26
 
 require (
+	github.com/open-spaced-repetition/go-fsrs/v4 v4.0.0
 	github.com/wailsapp/wails/v3 v3.0.0-beta.22
 	modernc.org/sqlite v1.59.0
 )

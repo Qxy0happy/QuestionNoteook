@@ -2,13 +2,17 @@
   import { onMount } from 'svelte';
   import Capture from './Capture.svelte';
   import Library from './Library.svelte';
+  import Review from './Review.svelte';
+  import Agent from './Agent.svelte';
   import type { Question } from '../bindings/questionbook/internal/library/models';
 
-  // 主界面三页，横向排列。拍照居中且是默认页 —— 打开 app 看到的第一个画面就是取景。
+  // 主界面四页，横向排列。拍照在第二位且是默认页 —— 打开 app 看到的第一个画面就是取景；
+  // 往左滑是 Agent，往右依次是题库与复习。
   const PAGES = [
     { id: 'agent', label: 'Agent' },
     { id: 'capture', label: '拍照' },
     { id: 'library', label: '题库' },
+    { id: 'review', label: '复习' },
   ] as const;
   const DEFAULT_PAGE = 1;
   const CAPTURE_PAGE = 1;
@@ -56,10 +60,14 @@
         <!-- 中间这页是取景，挂载即开镜。上面没有引导层，打开 app 直接就在取景。 -->
         <Capture {answerFor} onAnswerAttached={answerAttached} />
       {:else if page.id === 'library'}
-        <!-- 右页是题库：错题列表 + 点开看题图。切到这一页它自己会重拉一次列表。 -->
+        <!-- 题库：错题列表 + 点开看题图。切到这一页它自己会重拉一次列表。 -->
         <Library onCaptureAnswer={startAnswer} />
+      {:else if page.id === 'review'}
+        <!-- 复习：今日到期的队列 + 四档自评。同样是自己发现被划到可见时才拉队列。 -->
+        <Review />
       {:else}
-        <span class="page-label">{page.label}</span>
+        <!-- Agent：目前就一件事 —— 配 VLM 的端点与凭据。 -->
+        <Agent />
       {/if}
     </section>
   {/each}
@@ -90,12 +98,5 @@
   /* 取景页整页铺满，不参与居中 —— 网格居中会让视频退到它的固有尺寸。 */
   .page-capture {
     display: block;
-  }
-
-  .page-label {
-    font-size: 1.5rem;
-    font-weight: 700;
-    letter-spacing: 0.1em;
-    color: rgba(244, 246, 251, 0.35);
   }
 </style>

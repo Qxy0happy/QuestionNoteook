@@ -16,7 +16,9 @@ import (
 
 	"questionbook/internal/capture"
 	"questionbook/internal/library"
+	"questionbook/internal/review"
 	"questionbook/internal/tags"
+	"questionbook/internal/vlm"
 )
 
 // 前端构建产物（vite 产出到 frontend/dist）嵌进二进制，由资源服务器进程内提供。
@@ -46,8 +48,14 @@ func main() {
 	// 依赖方向只有一条：采集 → 题库。题库要能读题图、也要能在补拍答案图时拉正并落盘，
 	// 所以把两个能力都注进去，而不是让两边互相 import。
 	libraryService := library.NewService(db, cardStore, library.WithImageFiles(cardFiles{store: cardStore}))
-	// 标签与错题共用同一个连接（tags.NewService 内部走 store.DB()），不再开第二条。
+	// 标签与错题共用同一个连接（tags.NewService 内部走 store.DB()），复习也一样
+	// （review.NewService 吃的是 Store 而不是 Service，自己借那条连接）。都不再开第二条。
 	tagsService := tags.NewService(db)
+	reviewService := review.NewService(db)
+
+	// VLM 的端点与凭据不进库：它们是配置，不是错题的数据模型（ADR-0004 已经把「库外的东西」
+	// 这个模式立好了）。路径与 library.db、cards/ 并列在同一个应用私有目录下。
+	vlmService := vlm.NewService(libraryService, tagsService, filepath.Join(root, "vlm.json"))
 
 	app := application.New(application.Options{
 		Name:        "错题本",
@@ -56,6 +64,8 @@ func main() {
 			application.NewService(capture.NewService(cardStore, libraryService)),
 			application.NewService(libraryService),
 			application.NewService(tagsService),
+			application.NewService(reviewService),
+			application.NewService(vlmService),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),

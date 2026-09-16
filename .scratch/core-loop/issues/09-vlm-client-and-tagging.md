@@ -4,24 +4,87 @@
 
 **Blocked by:** 07（标签：三层树）
 
-**Status:** ready-for-agent
+**Status:** ready-for-human —— Go 侧 30 条测试全过（不打真实网络）；界面接线完成、`svelte-check` 0 错，**真机与真实 provider 都未验**
 
-- [ ] provider 是一层抽象：base_url 与模型名都来自配置，代码里**不出现硬编码的模型 ID**
-- [ ] 保留纯文本模型作为非图片流量的回落
-- [ ] 图片按服务方推荐的方式传（避免同一张图反复上传），并显式请求高保真模式
-- [ ] 打标签是**主动触发**，不自动跑
-- [ ] 返回的标签先呈现给用户编辑，保存后才生效
-- [ ] 测试用假的 provider 实现，不打真实网络
-- [ ] 先看 01 的结论，据此定打标签的 prompt（**注意**：题目是印刷体，不是手写 —— 01 原先的前提写错了，已于 2026-09-16 更正）
+- [x] provider 是一层抽象：base_url 与模型名都来自配置，代码里**不出现硬编码的模型 ID**
+- [x] 保留纯文本模型作为非图片流量的回落
+      —— `text_model` 在配置里、`Provider` 接口也不绑视觉，但**本票没有调用点**：
+      真正的回落要等票 10 的讨论流量
+- [x] 图片按服务方推荐的方式传（避免同一张图反复上传），并显式请求高保真模式
+- [x] 打标签是**主动触发**，不自动跑
+- [x] 返回的标签先呈现给用户编辑，保存后才生效
+- [x] 测试用假的 provider 实现，不打真实网络
+- [ ] 先看 01 的结论，据此定打标签的 prompt
+      —— **01 还没做**（它要用户的真实印刷题照片）。prompt 是暂定的占位，接口契约（三层 + JSON 形状）
+      已定死，措辞/示例/条数上限都不是结论。**没有自创任何词表或分类体系**，唯一用到的词表是用户自己那棵树
 
-## VLM 契约
+## Comments
 
-写这张票时查证过的，**实现前请对着官方文档复核一遍**：
+### 实现前复核了官方文档，票里有两处转述是错的
 
-- 端点 `https://api.deepseek.com/chat/completions`，**OpenAI 兼容**（同时支持 Chat Completions / Messages / Responses 三种格式）
-- 视觉模型带 `Exp` 后缀，官方明说可能被修订或替换 —— 这就是 provider 抽象是硬要求、不是"以后换着方便"的原因
-- 三种传图方式：base64 内联（单图 ≤ 32 MiB）／外部 URL／**Files API**（免费，单文件 ≤ 64 MiB，可复用）。同一张题图会在「打标签」和「讨论」里反复用到，**Files API 明显更省**
-- 计费：单图最多按 **384 输入 token** 计
-- `detail` 参数：`low`（降采样到 512×512）／`high`·`original`（保留原尺寸）／`auto`。**密集文档必须用 high/original**，否则会被降采样
-- ⚠️ **图片只能放在 user 消息里** —— 放进 system 或 assistant 会直接 400
-- ⚠️ 写票时两个来源对模型 ID 说法不一（`deepseek-v4-flash-vision-exp` vs `deepseek-flash`）。**以官方文档为准，别信这条转述**
+票原来写的那节契约要求「实现前对着官方文档复核一遍」，照做了（`api-docs.deepseek.com` 的
+vision / files_api / pricing 三页，WebFetch 直读）。结论：
+
+| 项 | 票里的转述 | 官方文档 |
+|---|---|---|
+| **模型 ID** | 两个来源打架 | **现在的视觉模型就叫 `deepseek-flash`**；`deepseek-v4-flash-vision-exp` 是**已退役的旧名**，仍被接受、由最新 Flash 应答。两个名字都没进代码，全走配置 |
+| **单图计费** | 最多 384 输入 token | **上限 1024 token/图**（缩到约 1300×1300 的像素量）。384 只出现在第三方文章里。不影响实现，只影响对成本的预期 |
+| **`detail` 与 Files API 的关系** | 票把「用 Files API」与「显式要高保真」并列为两条要同时满足的事 | **`detail` 只对 `image_url`（内联/外链）生效，用 `file_id` 传时被忽略** —— 两者不在同一层：前者换传输方式，后者只在内联那条路上表达得出来 |
+| **Files API「免费」** | 说免费 | 官方文档**没有这句话**（pricing 页只列 token 价）。按「官方未表态」记 |
+
+**票里那句「模型名带 `Exp` 后缀，可能被替换」也要修正**：现在这个模型名不带 Exp，
+而「可能被替换」**已经发生过一次**了 —— 所以 provider 抽象是硬要求这件事，比票写的时候更硬。
+
+顺带一条官方明确、实现里用上的：**格式按内容判定**，不看文件名与声明的 MIME。
+
+### provider 抽象的接口
+
+```go
+type Provider interface {
+	Upload(ctx context.Context, img Image) (string, error) // 不支持时返回 ErrNoUpload
+	Chat(ctx context.Context, req Request) (Reply, error)  // req.Model 由调用方从配置取好
+}
+```
+
+端点、凭据、模型名都不在接口里，也都不在代码里。`Config.Validate` 在 `vision_model` 为空时
+报 `ErrNotConfigured`，**不会退回一个写死的名字**。
+
+### 配置在库外
+
+`<dataDir>/vlm.json`（0600，临时文件+改名原子写）配 `<dataDir>/vlm-files.json`（hash → file_id
+的缓存，换 key 后按指纹作废重传）。不进 SQLite 的理由不只是避开并行改迁移：配置/凭据本来就不属于
+错题的数据模型，而 ADR-0004 已经把「库外的东西」这个模式立好了。
+
+`SetConfig` 是**补丁语义**：空串 = 这一项不动。因为凭据拿不回值（`ConfigView` 只有
+`APIKeySet` / `APIKeyLength`），整份覆盖会把 key 抹掉。
+
+### 一个被 Wails 逼出来的设计
+
+`TagSuggestion.Problem` 是**字段而不是 error**：调用成功但模型答得不能用时，error 为 nil 而
+`Problem` 非空，同时 `Raw` 带着模型原话。因为 **Wails 的 error 会把返回值一起丢掉**，
+而这里恰恰要把原话交给用户看（票 01 调 prompt 全靠它）。真正的调用失败（网络/401/没配置）仍是 error。
+
+`SaveTags` 挂的是**整条路径**（学科+章节+知识点），与手工勾选面板 `TagFilter` 勾一个知识点会
+连带勾父的形状一致 —— 免得「这题有几个标签」随入口不同。
+
+### 新增了 `Agent.svelte`（接线时补的，票里没写）
+
+票没要求设置界面，但**没有它这个功能就等于没有**：配置落在
+`/data/data/<包名>/files/questionbook/`，手机上没有任何文件管理器够得着。
+所以接线时加了 Agent 页：接口地址、API Key、两个模型名、`detail` 档、提示词，凭据只出不进
+（读回来的只有「设没设」与长度）。
+
+### 未验证
+
+- **真实 provider 一次都没跑过**：端点形状、`detail` 在内嵌套的位置、上传引用能不能被 `file` 块
+  吃下，全是照文档写的。真实 key 与真机是用户那边的事。
+- `response_format: {"type":"json_object"}` **没实测**：官方 pricing 页说该模型支持 JSON Output，
+  但没给这条端点的确切字段形状。若被拒会是 400，错误里带服务方原话；要撤就删 `deepseek.go` 里那两行，
+  解析侧有容错。
+- 上传过的图**没有回收**（没调删除接口），服务方账号里会慢慢堆积；本地缓存文件一直长（每条几十字节）。
+  不设过期是刻意的 —— 设了会换来「某天起又要重传」的哑巴故障。
+- `SuggestTags` **不可取消**：Wails 方法不带 ctx，内部用 `context.Background()`，超时靠
+  `http.Client` 的 3 分钟。用户中途退出只能忽略结果。
+- **批量打标签**（spec 用户故事 19）没做：票的清单只要求「对一道错题主动触发」。要批量在
+  `SuggestTags` 外面套一层循环即可。
+- 界面只过类型检查，**没有渲染过**。

@@ -13,8 +13,7 @@ type migration struct {
 // **已经发布出去的那几条永远不要改** —— 老库只会跑比自己版本号大的那些，
 // 改了它们等于让老库和新库模式不一致。要改就追加新的一条。
 //
-// 这张表里还没有的：复习状态、复习记录、讨论、待批准改动。
-// 它们跟着各自的票走，各加一条迁移。
+// 这张表里还没有的：讨论、待批准改动。它们跟着各自的票走，各加一条迁移。
 var migrations = []migration{
 	{
 		version: 1,
@@ -84,6 +83,59 @@ var migrations = []migration{
 				(NULL, '英语',   1, CAST(strftime('%s','now') AS INTEGER) * 1000),
 				(NULL, '政治',   1, CAST(strftime('%s','now') AS INTEGER) * 1000),
 				(NULL, '专业课', 1, CAST(strftime('%s','now') AS INTEGER) * 1000)`,
+		},
+	},
+	{
+		version: 3,
+		name:    "建复习状态与复习记录",
+		stmts: []string{
+			// 每道错题一份 FSRS 状态。列与官方 go-fsrs 的 Card 一一对应 ——
+			// 这一行**就是**那张卡，中间不加一层自己的翻译（ADR-0002）。
+			// 读写它的代码在 internal/review。
+			//
+			// 没有行的错题 = 从没复习过 = 新题。刻意不在建题时预建一行零值：
+			// 「还没复习过」这件事，没有行本身就说得清楚；预建一行的代价是每个读它的
+			// 地方都得再判断「这行是真的还是占位的」。队列那侧用
+			// COALESCE(due_at, created_at) 表达了「新题从被拍下来那一刻起就到期」。
+			`CREATE TABLE review_states (
+				-- 一道题一份；题没了状态跟着走。主键本身就是「按题查状态」的索引。
+				question_id     INTEGER PRIMARY KEY REFERENCES questions(id) ON DELETE CASCADE,
+				-- Unix 毫秒（UTC）—— 与 questions.created_at 同一个约定。
+				due_at          INTEGER NOT NULL,
+				-- FSRS 的记忆量。REAL 是因为它们本来就是浮点，取整会把算法算出来的东西弄丢。
+				stability       REAL    NOT NULL,
+				difficulty      REAL    NOT NULL,
+				-- 上次评级算出的间隔（天）。0 = 还没到过「天」的尺度（新题的零值）。
+				scheduled_days  INTEGER NOT NULL,
+				reps            INTEGER NOT NULL,
+				lapses          INTEGER NOT NULL,
+				-- 0 新 / 1 学习 / 2 复习 / 3 重学：就是 fsrs.State 的取值。
+				state           INTEGER NOT NULL CHECK (state BETWEEN 0 AND 3),
+				-- 上次复习时刻；0 表示还没有过（fsrs.Card 的零值 LastReview）。
+				-- 不用 NULL：这里的「没有」恰好就是 0，多一种空值只是多一种要判的情况。
+				last_review_at  INTEGER NOT NULL,
+				remaining_steps INTEGER NOT NULL
+			) WITHOUT ROWID`,
+			// 队列只按一条查询取：到期时刻小于某条界线。这条索引正好覆盖它。
+			`CREATE INDEX review_states_due_idx ON review_states (due_at)`,
+
+			// 每次复习一条，只增不改。评级、时刻、当时算出的间隔是票里点名的三样；
+			// 另外记下当时算出的到期与记忆量 —— FSRS 的输出就在手上，不留下来，
+			// 「最近的表现」（票据 14）以后只能反推。
+			`CREATE TABLE review_logs (
+				id             INTEGER PRIMARY KEY AUTOINCREMENT,
+				question_id    INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+				-- 1 Again / 2 Hard / 3 Good / 4 Easy：就是 fsrs.Rating 的取值。
+				rating         INTEGER NOT NULL CHECK (rating BETWEEN 1 AND 4),
+				reviewed_at    INTEGER NOT NULL,
+				-- **这次**算出来的间隔，不是复习之前的那个（见 review.Store.save）。
+				scheduled_days INTEGER NOT NULL,
+				due_at         INTEGER NOT NULL,
+				stability      REAL    NOT NULL,
+				difficulty     REAL    NOT NULL
+			)`,
+			// 回看一道题的复习史（票据 14 的「最近的表现」）走这条。
+			`CREATE INDEX review_logs_question_idx ON review_logs (question_id, reviewed_at DESC)`,
 		},
 	},
 }

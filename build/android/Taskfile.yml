@@ -369,7 +369,12 @@ tasks:
     preconditions:
       # Windows 的文件模式没有真正的可执行位，`-x` 恒为假（实测：adb 明明能调起来，
       # 这条判据却报 "adb not found"）—— 用 `-f` 判断文件存在就够。
-      - sh: '[ -f "{{.ADB}}" ] || command -v adb'
+      #
+      # 三个任务都要这条判据（ensure-emulator / run:device / deploy-device），所以在这里
+      # 锚一份，另外两处只写一行 `- *adb-present` 引过来。YAML 的别名不带注释，所以理由
+      # 只留在这一处；改判据也只需要改这一处。
+      - &adb-present
+        sh: '[ -f "{{.ADB}}" ] || command -v adb'
         msg: "adb not found. Install the Android SDK platform-tools (or set ANDROID_HOME)"
       # 同上：`-x` 在 Windows 上恒为假。
       - sh: '[ -f "{{.EMULATOR}}" ] || command -v emulator'
@@ -411,7 +416,9 @@ tasks:
           ARCH: arm64
     cmds:
       - task: assemble:apk
-      - |
+      # 挑一台真机、装、起。deploy-device 用的是**同一段**（它那边写 `- *deploy-to-device`
+      # 引过来），所以这里改一次就是两处都改 —— 两条路唯一的不同只在前一步出的包。
+      - &deploy-to-device |
         DEVICE='{{.DEVICE_ID | default ""}}'
         if [ -z "$DEVICE" ]; then
           DEVICE="${DEVICE_ID:-}"
@@ -440,10 +447,9 @@ tasks:
         "{{.ADB}}" -s "$DEVICE" install "{{.BIN_DIR}}/{{.APP_NAME}}.apk"
         "{{.ADB}}" -s "$DEVICE" shell am start -n {{.APP_ID}}/com.wails.app.MainActivity
     preconditions:
-      # Windows 的文件模式没有真正的可执行位，`-x` 恒为假（实测：adb 明明能调起来，
-      # 这条判据却报 "adb not found"）—— 用 `-f` 判断文件存在就够。
-      - sh: '[ -f "{{.ADB}}" ] || command -v adb'
-        msg: "adb not found. Install the Android SDK platform-tools (or set ANDROID_HOME)"
+      # 与 ensure-emulator 那条是同一个判据（锚在那儿：&adb-present）——
+      # 别在这儿另抄一份，抄出来的那份迟早跟正本对不上。
+      - *adb-present
 
   deploy-device:
     summary: Deploy the packaged release APK to a connected physical Android device
@@ -452,39 +458,13 @@ tasks:
         vars:
           ARCH: arm64
     cmds:
-      - |
-        DEVICE='{{.DEVICE_ID | default ""}}'
-        if [ -z "$DEVICE" ]; then
-          DEVICE="${DEVICE_ID:-}"
-        fi
-        if [ -z "$DEVICE" ]; then
-          # 该内置 shell 的 PATH 是 Windows 的，没有 awk（scoop shims 里也没有）。
-          # 用 tail/tr + read 取第一个 state=device 且不是模拟器的序列号。
-          DEVICE=$("{{.ADB}}" devices | tr -d '\r' | tail -n +2 | {
-            while read -r SERIAL STATE _REST; do
-              [ "$STATE" = "device" ] || continue
-              case "$SERIAL" in emulator-*) continue ;; esac
-              echo "$SERIAL"
-              break
-            done
-          })
-        fi
-        if [ -z "$DEVICE" ]; then
-          echo "Error: no connected physical Android device found."
-          echo "Pass DEVICE_ID=<serial> to target a device explicitly."
-          echo "Find connected device serials with: {{.ADB}} devices"
-          exit 1
-        fi
-
-        echo "Deploying {{.BIN_DIR}}/{{.APP_NAME}}.apk to device $DEVICE..."
-        "{{.ADB}}" -s "$DEVICE" uninstall {{.APP_ID}} 2>/dev/null || true
-        "{{.ADB}}" -s "$DEVICE" install "{{.BIN_DIR}}/{{.APP_NAME}}.apk"
-        "{{.ADB}}" -s "$DEVICE" shell am start -n {{.APP_ID}}/com.wails.app.MainActivity
+      # 挑设备 + 装 + 起：与 run:device 逐字相同，共用那一段（锚在那儿：&deploy-to-device）。
+      # 两条路唯一的不同只在前一步出的包（那边 assembleDebug，这边 package 出 release）。
+      - *deploy-to-device
     preconditions:
-      # Windows 的文件模式没有真正的可执行位，`-x` 恒为假（实测：adb 明明能调起来，
-      # 这条判据却报 "adb not found"）—— 用 `-f` 判断文件存在就够。
-      - sh: '[ -f "{{.ADB}}" ] || command -v adb'
-        msg: "adb not found. Install the Android SDK platform-tools (or set ANDROID_HOME)"
+      # 与 ensure-emulator 那条是同一个判据（锚在那儿：&adb-present）——
+      # 别在这儿另抄一份，抄出来的那份迟早跟正本对不上。
+      - *adb-present
 
   studio:
     summary: Open the generated Android project in Android Studio
