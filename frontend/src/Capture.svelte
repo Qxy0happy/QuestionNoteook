@@ -72,6 +72,9 @@
   // 交给 Go 的那一趟还没回来。期间锁住三个按钮，免得重复提交。
   let busy = $state(false);
   let errorText = $state('');
+  // 补拍存成之后那一句「存到哪了」。本页存完就退回取景、成品也消失，没有这句话的话
+  // 用户看到的只是画面闪回取景，无从判断到底存上没有。
+  let savedNote = $state('');
 
   // 流只在可见期间持有，滑走就还给系统。
   let stream: MediaStream | null = null;
@@ -167,6 +170,8 @@
     if (answerFor === lastAnswerFor) return;
     lastAnswerFor = answerFor;
     clearShot();
+    // 换了目标（或者从补拍切回拍新题）：「已存到那道题」这句话就不再是这句意思了。
+    savedNote = '';
   });
 
   // 快门：整帧按**源像素密度**搬到 canvas 上 —— 不裁、不降采样。
@@ -177,6 +182,9 @@
   function shutter() {
     const el = video;
     if (!el || el.videoWidth === 0) return;
+
+    // 又按了一次快门：上一句「已存到那道题」不再是当下的事。
+    savedNote = '';
 
     const vw = el.videoWidth;
     const vh = el.videoHeight;
@@ -292,6 +300,9 @@
         const q = await library.AttachAnswer(answerFor, base64, quad);
         // 先清本页再交出去：extern 那边一收到就会退出补拍态，本页不该还停在一张旧成品上。
         clearShot();
+        // 存完要把话说出来：本页马上退回取景，那张成品也消失了 —— 不说一句的话，
+        // 用户看到的只是「画面闪回取景」，无从判断到底存上没有（他就这么问过一次）。
+        savedNote = '答案图已保存到那道题上';
         onAnswerAttached?.(q);
       } else {
         // 一趟做完：拉正 + 按内容 hash 落盘 + 建错题，回来的是**新错题**本身。
@@ -376,6 +387,9 @@
 
   {#if errorText}
     <p class="error">{errorText}</p>
+  {/if}
+  {#if savedNote}
+    <p class="saved">{savedNote}</p>
   {/if}
 </div>
 
@@ -580,6 +594,20 @@
     border-radius: 0.75rem;
     background: rgba(0, 0, 0, 0.7);
     color: #ffb4b4;
+    font-size: 0.85rem;
+    text-align: center;
+  }
+  /* 补拍存成那一句：与 .error 同一处、同一个样子，只是绿的。 */
+  .saved {
+    position: absolute;
+    left: 1.5rem;
+    right: 1.5rem;
+    top: 1.5rem;
+    margin: 0;
+    padding: 0.75rem 1rem;
+    border-radius: 0.75rem;
+    background: rgba(0, 0, 0, 0.7);
+    color: #96e6b4;
     font-size: 0.85rem;
     text-align: center;
   }

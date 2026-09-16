@@ -404,8 +404,9 @@ tasks:
           ARCH: '{{.ARCH | default .HOST_ARCH}}'
     cmds:
       - task: ensure-emulator
-      - '"{{.ADB}}" uninstall {{.APP_ID}} 2>/dev/null || true'
-      - '"{{.ADB}}" install "{{.BIN_DIR}}/{{.APP_NAME}}.apk"'
+      # -r 保留数据（与 run:device 那条同一个理由，见那边的注释）。模拟器的状态本来就可以
+      # 随手丢，所以想从零开始就 `adb -e shell pm clear {{.APP_ID}}`。
+      - '"{{.ADB}}" install -r "{{.BIN_DIR}}/{{.APP_NAME}}.apk"'
       - '"{{.ADB}}" shell am start -n {{.APP_ID}}/com.wails.app.MainActivity'
 
   run:
@@ -415,8 +416,9 @@ tasks:
       - task: build
     cmds:
       - task: assemble:apk
-      - '"{{.ADB}}" uninstall {{.APP_ID}} 2>/dev/null || true'
-      - '"{{.ADB}}" install "{{.BIN_DIR}}/{{.APP_NAME}}.apk"'
+      # -r 保留数据（与 run:device 那条同一个理由，见那边的注释）。模拟器的状态本来就可以
+      # 随手丢，所以想从零开始就 `adb -e shell pm clear {{.APP_ID}}`。
+      - '"{{.ADB}}" install -r "{{.BIN_DIR}}/{{.APP_NAME}}.apk"'
       - '"{{.ADB}}" shell am start -n {{.APP_ID}}/com.wails.app.MainActivity'
 
   device:list:
@@ -459,8 +461,13 @@ tasks:
         fi
 
         echo "Deploying {{.BIN_DIR}}/{{.APP_NAME}}.apk to device $DEVICE..."
-        "{{.ADB}}" -s "$DEVICE" uninstall {{.APP_ID}} 2>/dev/null || true
-        "{{.ADB}}" -s "$DEVICE" install "{{.BIN_DIR}}/{{.APP_NAME}}.apk"
+        # -r = 覆盖安装，**保留应用数据**。
+        #
+        # 这里原来是 uninstall + install，那等于每次部署都把用户的错题库清空 —— 这个应用的
+        # 图片与库全在私有目录里（files/questionbook/），卸载就是全丢，而且是**不可恢复**的。
+        # 开发期反复部署时更要命：刚拍的题、刚复习出的状态，下一次部署就没了。
+        # 真要清一遍（比如改了 schema 想从头来）手动 `adb uninstall` 一次即可。
+        "{{.ADB}}" -s "$DEVICE" install -r "{{.BIN_DIR}}/{{.APP_NAME}}.apk"
         "{{.ADB}}" -s "$DEVICE" shell am start -n {{.APP_ID}}/com.wails.app.MainActivity
     preconditions:
       # 与 ensure-emulator 那条是同一个判据（锚在那儿：&adb-present）——

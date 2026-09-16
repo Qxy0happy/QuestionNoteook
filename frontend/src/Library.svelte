@@ -248,6 +248,16 @@
         // 表达不了「一条标签都没挂」，所以走单独那条查询。
         questions = (await Tags.UntaggedQuestions()) ?? [];
       }
+
+      // 详情页那份快照也跟着换一批。
+      //
+      // 为什么非换不可：`opened` 是一个**快照**（列表里那一行的副本）。而「补拍答案图」是
+      // 从别的页做完再回来的 —— 那期间库里那道题已经被改了，这份快照却还是旧的：它的
+      // AnswerHash 仍是空串，于是详情页连「看答案图」都不出现，看着就像「补拍没存上」。
+      // （Go 侧其实写好了：库里那行的 answer_hash 与图片文件都在，只是这一页不知道。）
+      const cur = opened;
+      if (cur) opened = questions.find((q) => q.ID === cur.ID) ?? cur;
+
       listError = '';
     } catch (err) {
       listError = errorMessage(err);
