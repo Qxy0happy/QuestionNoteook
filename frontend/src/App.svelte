@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import Capture from './Capture.svelte';
 
   // 主界面三页，横向排列。拍照居中且是默认页 —— 打开 app 看到的第一个画面就是取景。
   const PAGES = [
@@ -19,8 +20,13 @@
 
 <main class="pages" bind:this={scroller}>
   {#each PAGES as page (page.id)}
-    <section class="page" data-page={page.id} aria-label={page.label}>
-      <span class="page-label">{page.label}</span>
+    <section class="page" class:page-capture={page.id === 'capture'} data-page={page.id} aria-label={page.label}>
+      {#if page.id === 'capture'}
+        <!-- 中间这页是取景，挂载即开镜。上面没有引导层，打开 app 直接就在取景。 -->
+        <Capture />
+      {:else}
+        <span class="page-label">{page.label}</span>
+      {/if}
     </section>
   {/each}
 </main>
@@ -45,6 +51,11 @@
     scroll-snap-align: start;
     display: grid;
     place-items: center;
+  }
+
+  /* 取景页整页铺满，不参与居中 —— 网格居中会让视频退到它的固有尺寸。 */
+  .page-capture {
+    display: block;
   }
 
   .page-label {
