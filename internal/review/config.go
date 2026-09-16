@@ -16,6 +16,21 @@ import (
 // dateLayout 是考试日期在设置文件里、也在界面上的形状。
 const dateLayout = "2006-01-02"
 
+// DefaultRetention 是期望保留率的默认值。**不是**官方默认的 0.90 —— 这是有意的偏离，
+// 理由与那两个数写在 Config.RequestRetention 上。
+const DefaultRetention = 0.95
+
+// 保留率允许的范围。上限 0.99 而不是 1.0：官方库的 Validate 判的是 (0, 1]，而 1.0 会让
+// 间隔公式里的对数变成 0 —— 那不是「复习得非常密」，是算不出来。下限 0.70 是照 FSRS
+// 那边的经验区间收的，再低就接近「随便排」了。
+const (
+	minRetention = 0.70
+	maxRetention = 0.99
+)
+
+// ErrBadRetention 表示期望保留率越界。判断用 errors.Is。
+var ErrBadRetention = errors.New("期望保留率要在 0.70 到 0.99 之间")
+
 // ErrBadExamDate 表示考试日期读不出来。判断用 errors.Is。
 var ErrBadExamDate = errors.New("考试日期要形如 2026-12-19")
 
@@ -31,6 +46,17 @@ var ErrNotConfigured = errors.New("复习参数还没配过")
 // 只有两项（ADR-0008）：FSRS 有 21 个权重、期望保留率、最大间隔、模糊开关，这里只露
 // 模糊与考试日期 —— 保留率与手填上限都是多余的旋钮，上限由考试日期推出来。
 type Config struct {
+	// RequestRetention 是期望保留率：一张卡到下次复习时**还记得**的概率目标。
+	// 调高 → 间隔明显变短、复习更密。
+	//
+	// 默认 **0.95**，比官方默认的 0.90 高 —— 这是本包第二处有意偏离官方默认（第一处是
+	// 关掉学习步，见 params）。理由是量出来的（票 08 里那张表）：考研是有截止日期的活，
+	// 0.90 时复习过三次的卡算出来是 141/196/318 天，全在考试之外，于是全被上限截到
+	// 「距考试 94 天」那附近 —— 四档评级因此挤成 90/91/92，在间隔上完全看不出区别，
+	// 而且每一张卡都堆到考前几天一起到期。0.95 时同一张卡是 29/38/56 天：四档分得开，
+	// 也没有一张碰到上限。
+	RequestRetention float64 `json:"request_retention"`
+
 	// Fuzz 打开官方库的间隔模糊。默认关（与官方默认一致）。
 	//
 	// 关着的时候同一天评级的题会**永远**撞在同一天到期（今天拍的一批题都评 Good，
@@ -44,13 +70,27 @@ type Config struct {
 	ExamDate string `json:"exam_date"`
 }
 
-// DefaultConfig 是没配过时的复习参数：模糊关着、没有考试日期。
+// DefaultConfig 是没配过时的复习参数：保留率 0.95、模糊关着、没有考试日期。
+func DefaultConfig() Config { return Config{RequestRetention: DefaultRetention} }
+
+// retention 返回**实际生效**的保留率。
 //
-// 也就是「与官方默认一字不差」的那一份 —— 装上之后的行为与本设置存在之前完全一样。
-func DefaultConfig() Config { return Config{} }
+// 0 在这里当「没设」而不是「非法」：装机上那份 `review.json` 是加这个字段**之前**写的，
+// 里面没有 `request_retention`，反序列化出来就是 0。要是判它非法，整份设置（连同用户
+// 填的考试日期）会被当成坏文件退回默认值 —— 那等于升级一次就把他配的东西丢了。
+// 所以旧文件读出来是「用默认值」，而这正是我们想让他得到的值。
+func (c Config) retention() float64 {
+	if c.RequestRetention == 0 {
+		return DefaultRetention
+	}
+	return c.RequestRetention
+}
 
 // Validate 检查这份设置能不能拿去算调度参数。
 func (c Config) Validate() error {
+	if r := c.retention(); r < minRetention || r > maxRetention {
+		return fmt.Errorf("%w，现在给的是 %v", ErrBadRetention, r)
+	}
 	if c.ExamDate == "" {
 		return nil
 	}
@@ -133,6 +173,7 @@ func (c Config) maxInterval(now time.Time) (float64, bool) {
 func (c Config) params(now time.Time) fsrs.Parameters {
 	p := fsrs.DefaultParam()
 	p.EnableShortTerm = false
+	p.RequestRetention = c.retention()
 	p.EnableFuzz = c.Fuzz
 	if mi, ok := c.maxInterval(now); ok {
 		p.MaximumInterval = mi
@@ -233,8 +274,11 @@ type ConfigView struct {
 	// Path 是设置文件的落点（安卓上用户平时够不着，出问题时至少知道去哪儿找）。
 	Path string
 
-	Fuzz     bool
-	ExamDate string
+	// RequestRetention 是**实际生效**的那个值（旧设置文件里没这一项时就是默认的 0.95），
+	// 不是文件里存的原始值 —— 界面要拿它显示，不该显示一个「0」。
+	RequestRetention float64
+	Fuzz             bool
+	ExamDate         string
 
 	// DaysToExam 是距考试还有几个日历天（负数 = 已经过去）。仅在 ExamDate 非空时有意义。
 	DaysToExam int
@@ -259,9 +303,10 @@ type ConfigView struct {
 func (c Config) view(path string, now time.Time, problem string) ConfigView {
 	mi, active := c.maxInterval(now)
 	return ConfigView{
-		Path:            path,
-		Fuzz:            c.Fuzz,
-		ExamDate:        c.ExamDate,
+		Path:             path,
+		RequestRetention: c.retention(),
+		Fuzz:             c.Fuzz,
+		ExamDate:         c.ExamDate,
 		DaysToExam:      c.daysToExam(now),
 		ExamActive:      active,
 		MaxIntervalDays: int(mi),

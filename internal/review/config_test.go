@@ -129,12 +129,53 @@ func TestLoadMissingFileIsNotConfigured(t *testing.T) {
 	}
 }
 
-// 默认设置就是零值：模糊关着、没有考试日期。
+// 默认设置：保留率 0.95、模糊关着、没有考试日期。
 //
-// 这是票里说定的「只加界面，默认不动」—— 装上之后的行为与本设置存在之前一字不差。
-func TestDefaultConfigIsTheZeroValue(t *testing.T) {
-	if got := review.DefaultConfig(); got.Fuzz || got.ExamDate != "" {
+// 前两项是**有意**的（0.95 的理由与实测见票 08：0.90 会让复习过的卡全顶到考试上限上），
+// 后两项与官方默认一致。装上之后的行为本来就与本设置存在之前**不**一样了 —— 这正是要的。
+func TestDefaultConfig(t *testing.T) {
+	got := review.DefaultConfig()
+	if got.RequestRetention != review.DefaultRetention {
+		t.Errorf("默认保留率是 %v，想要 %v", got.RequestRetention, review.DefaultRetention)
+	}
+	if got.Fuzz || got.ExamDate != "" {
 		t.Errorf("默认设置是 %+v，想要「模糊关着、没有考试日期」", got)
+	}
+}
+
+// 旧版设置文件里没有 `request_retention` 这一项 —— 读出来该是**默认的 0.95**，不是「文件坏了」。
+//
+// 装机上那份就是这么写的（它是加这个字段之前存的）。判它非法的话，用户升一次级就会连同
+// 他填的考试日期一起被退回默认值 —— 那等于把他配的东西丢了。
+func TestOldConfigWithoutRetentionUsesDefault(t *testing.T) {
+	svc, _, _, path := newServiceWithConfig(t, base)
+	if err := os.WriteFile(path, []byte(`{"fuzz":true,"exam_date":"2026-12-19"}`), 0o600); err != nil {
+		t.Fatalf("写一份旧版设置: %v", err)
+	}
+
+	view := svc.Config()
+	if view.Problem != "" {
+		t.Errorf("旧版设置被当成坏文件了：%s", view.Problem)
+	}
+	if view.RequestRetention != review.DefaultRetention {
+		t.Errorf("视图里的保留率是 %v，想要默认值 %v", view.RequestRetention, review.DefaultRetention)
+	}
+	if !view.Fuzz || view.ExamDate != "2026-12-19" {
+		t.Errorf("旧文件里那两项该原样保留，拿到 fuzz=%v exam=%q", view.Fuzz, view.ExamDate)
+	}
+}
+
+// 保留率越界要在**存之前**拦住；而「0」不算越界 —— 它表示「没设过」，用默认值。
+func TestValidateRetentionRange(t *testing.T) {
+	for _, bad := range []float64{0.69, 1.0, 1.5, -0.5} {
+		if err := (review.Config{RequestRetention: bad}).Validate(); !errors.Is(err, review.ErrBadRetention) {
+			t.Errorf("保留率 %v 应当被拒，得到 %v", bad, err)
+		}
+	}
+	for _, ok := range []float64{0, 0.70, 0.95, 0.99} {
+		if err := (review.Config{RequestRetention: ok}).Validate(); err != nil {
+			t.Errorf("保留率 %v 应当通过，得到 %v", ok, err)
+		}
 	}
 }
 

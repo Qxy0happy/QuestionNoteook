@@ -68,6 +68,8 @@
   // 表单里**还没保存**那份算出来的视图。它是「改一下就能看见间隔怎么变」的全部实现。
   let reviewPreview = $state<ReviewConfigView | null>(null);
   let reviewFuzz = $state(false);
+  // 期望保留率。滑块绑的是**数字**（Svelte 对 type="range" 会转成 number）。
+  let reviewRetention = $state(0.95);
   let reviewExamDate = $state(''); // "YYYY-MM-DD"，空 = 不设
   let reviewSaving = $state(false);
   let reviewError = $state('');
@@ -361,6 +363,9 @@
       reviewView = v;
       reviewPreview = null;
       reviewFuzz = v.Fuzz;
+      // 读回来的是**实际生效**的那个值：设置文件里没这一项（旧版写的）时服务端会给默认值，
+      // 所以界面上不会出现一个 0。
+      reviewRetention = v.RequestRetention;
       reviewExamDate = v.ExamDate;
       reviewError = '';
     } catch (err) {
@@ -375,7 +380,11 @@
   // 算不出来（日期正打到一半）就退回按已保存那份显示，**不弹错**：他还在打字。
   async function previewReview() {
     try {
-      reviewPreview = await Review.Preview({ fuzz: reviewFuzz, exam_date: reviewExamDate });
+      reviewPreview = await Review.Preview({
+        request_retention: reviewRetention,
+        fuzz: reviewFuzz,
+        exam_date: reviewExamDate,
+      });
     } catch {
       reviewPreview = null;
     }
@@ -397,7 +406,11 @@
     try {
       // 键名是小写的那两个：Go 侧 Config 带 json tag（fuzz / exam_date），生成的类型用的
       // 就是 tag 名 —— 写 Go 的字段名编译期就过不去（与 digest / vlm 同一个规矩）。
-      const cfg: ReviewConfig = { fuzz: reviewFuzz, exam_date: reviewExamDate };
+      const cfg: ReviewConfig = {
+        request_retention: reviewRetention,
+        fuzz: reviewFuzz,
+        exam_date: reviewExamDate,
+      };
       // 整份提交，不是补丁：这一份没有凭据要护着。
       const res = await Review.SetConfig(cfg);
       reviewView = res.View;
@@ -671,8 +684,9 @@
            只有两个旋钮：考试日期、间隔模糊。**没有**「最大间隔」那一栏 —— 上限是从考试
            日期推出来的（ADR-0008），多一个要手填的天数只会让人不知道该填哪个。 -->
       <p class="note">
-        间隔由 FSRS 算（官方算法与权重，只把「学习步」关掉了）。要说的其实是「考试之前
-        都得再过一遍」，所以上限是从考试日期推出来的，不用你手填一个天数。
+        间隔由 FSRS 算。要说的其实是「考试之前都得再过一遍」，所以上限是从考试日期推出来的，
+        不用你手填一个天数；而「多久复习一次」由期望保留率定 —— 调高它复习得更密，间隔也就
+        不会全挤到上限那几天去。
       </p>
 
       {#if reviewView?.Problem}
@@ -684,6 +698,25 @@
       {#if reviewSaved}
         <p class="banner ok">{reviewSaved}</p>
       {/if}
+
+      <label>
+        <span>
+          期望保留率<span class="opt">调高 → 间隔更短、复习更密</span>
+        </span>
+        <!-- 滑块而不是数字框：手机上敲「0.95」费劲，而这个值要的是看得见它在动 ——
+             下面那行四档间隔会跟着实时变（previewReview），所以「调高会怎样」不必猜。 -->
+        <div class="slider">
+          <input
+            type="range"
+            min="0.70"
+            max="0.99"
+            step="0.01"
+            bind:value={reviewRetention}
+            oninput={previewReview}
+          />
+          <span class="val">{reviewRetention.toFixed(2)}</span>
+        </div>
+      </label>
 
       <label>
         <span>考试日期<span class="opt">空着就不限</span></span>
@@ -1016,6 +1049,31 @@
     height: 1.15rem;
     flex: none;
     margin: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    accent-color: #9fd4ff;
+  }
+
+  /* 滑块那一行：滑块占满，右边跟着一个两位小数的读数。 */
+  .slider {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+  }
+  .val {
+    flex: none;
+    min-width: 2.6rem;
+    text-align: right;
+    font-size: 0.9rem;
+    font-variant-numeric: tabular-nums;
+    color: rgba(244, 246, 251, 0.85);
+  }
+  /* 上面那条 input, select, textarea 的通配规则是给文本框写的；滑块套上去会变成一个
+     带边框底色的怪盒子，这里把它改回一根轨道（accent-color 与勾选框同一套配色）。 */
+  input[type='range'] {
+    flex: 1;
+    width: auto;
     padding: 0;
     border: 0;
     background: none;

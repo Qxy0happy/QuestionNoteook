@@ -14,35 +14,48 @@ import (
 // 它防的是一类**静默**的坏：库升级之后默认权重 / 保留率 / 上限悄悄变了，复习间隔于是整体变了，
 // 而没有任何东西会红 —— 「你确定 FSRS 是完好的吗」这个问题的正确答案不该是「我读过代码，看着对」。
 //
-// 所以这里逐字段比，并把「**默认设置下只允许一处偏离**」写成断言：将来要再偏离一处，得先改
-// 这条测试，而那一步是**故意**要人停下来想一想的。
+// **偏离只有两处，而且每一处都必须写明白**：
 //
-// 票 18 之后用户自己能把上限压下来（填考试日期）、把模糊打开 —— 那两处偏离由下面
+//  1. **学习步关掉**（四档的尺度要与「每日复习」对齐，理由见 Config.params）；
+//  2. **期望保留率 0.95**，比官方默认的 0.90 高（理由与实测数字见 Config.RequestRetention）。
+//
+// 将来要再偏离一处，得先改这条测试 —— 而那一步是**故意**要人停下来想一想的。
+//
+// 用户自己能把上限压下来（填考试日期）、把模糊打开、把保留率调掉 —— 那几处由下面
 // TestConfiguredParamsReachTheScheduler 盯着：它验的是「设置真的送到了库里」，
 // 而不是「我们算出了一个数」。
-func TestSchedulerDeviatesFromDefaultsInExactlyOnePlace(t *testing.T) {
+func TestSchedulerDeviatesFromDefaultsInExactlyTwoPlaces(t *testing.T) {
 	want := fsrs.DefaultParam()
 	now := time.Date(2026, 9, 16, 10, 0, 0, 0, time.Local)
 	got := DefaultConfig().params(now)
 
-	// 先把「库的默认是什么」也钉住：上游把默认值本身改了，这两条会先红 ——
+	// 先把「库的默认是什么」也钉住：上游把默认值本身改了，这几条会先红 ——
 	// 好过让下面那些逐字段比较去猜是上游变了还是我们变了。
 	if !want.EnableShortTerm {
 		t.Fatal("官方默认的 EnableShortTerm 不再是 true 了 —— 上游改过默认值，先确认这是不是有意的")
+	}
+	if want.RequestRetention != 0.9 {
+		t.Fatalf("官方默认的保留率不再是 0.9 了（现在是 %v）—— 上游改过默认值，先确认这是不是有意的",
+			want.RequestRetention)
 	}
 	if len(want.W) != 21 {
 		t.Fatalf("官方权重是 %d 位，FSRS-6 应当是 21 位", len(want.W))
 	}
 
-	// ── 唯一允许的偏离：学习步关掉 ──
+	// ── 偏离一：学习步关掉 ──
 	if got.EnableShortTerm {
-		t.Error("学习步应当是关掉的：理由见 newScheduler 的注释（四档的尺度要与「每日复习」对齐）")
+		t.Error("学习步应当是关掉的：四档的尺度要与「每日复习」对齐，理由见 Config.params")
+	}
+
+	// ── 偏离二：保留率比官方默认高 ──
+	if got.RequestRetention != DefaultRetention {
+		t.Errorf("RequestRetention = %v，想要 %v", got.RequestRetention, DefaultRetention)
+	}
+	if got.RequestRetention == want.RequestRetention {
+		t.Error("保留率与官方默认相同了 —— 那这处偏离就没了，先确认是不是有意的")
 	}
 
 	// ── 其余每一项都必须与官方默认一致 ──
-	if got.RequestRetention != want.RequestRetention {
-		t.Errorf("RequestRetention = %v，官方默认是 %v", got.RequestRetention, want.RequestRetention)
-	}
 	if got.MaximumInterval != want.MaximumInterval {
 		t.Errorf("MaximumInterval = %v，官方默认是 %v", got.MaximumInterval, want.MaximumInterval)
 	}
@@ -173,27 +186,65 @@ func TestConfiguredParamsReachTheScheduler(t *testing.T) {
 	want := fsrs.DefaultParam()
 	now := time.Date(2026, 9, 16, 10, 0, 0, 0, time.Local)
 
-	cfg := Config{Fuzz: true, ExamDate: "2026-12-19"} // 距 now 正好 94 天
+	cfg := Config{RequestRetention: 0.97, Fuzz: true, ExamDate: "2026-12-19"} // 距 now 正好 94 天
 	got := cfg.params(now)
 
 	if !got.EnableFuzz {
 		t.Error("设置了模糊，但调度器拿到的 EnableFuzz 还是 false")
+	}
+	if got.RequestRetention != 0.97 {
+		t.Errorf("RequestRetention = %v，设置里填的是 0.97（这一项在界面上有得改，所以必须送进去）",
+			got.RequestRetention)
 	}
 	const wantDays = 94
 	if got.MaximumInterval != wantDays {
 		t.Errorf("MaximumInterval = %v，想要距考试的天数 %d", got.MaximumInterval, wantDays)
 	}
 
-	// 其余各项仍必须是官方默认：这一页只露两个旋钮，不该顺手动到别的。
-	if got.RequestRetention != want.RequestRetention {
-		t.Errorf("RequestRetention = %v，官方默认是 %v（这一项在界面上根本没得改）",
-			got.RequestRetention, want.RequestRetention)
-	}
+	// 其余各项仍必须是官方默认：这一页只露三个旋钮，不该顺手动到别的。
 	if got.W != want.W {
 		t.Error("权重被动过了 —— 设置页只该改模糊与上限")
 	}
 	if got.EnableShortTerm {
 		t.Error("学习步应当仍然是关掉的")
+	}
+}
+
+// 保留率这个旋钮的**方向**：调高 → 间隔变短。
+//
+// 用户最容易记反的就是这个方向（「保留率越高不是该记得越久吗」），所以把它钉成断言，
+// 而不是只写在界面上的一句话里。
+//
+// 两件事都是量出来的，也都写在注释里：
+//
+//   - 拿**复习过的卡**看，差别是数量级的：0.90 是 141/196/318 天，0.95 是几十天。
+//   - 拿**新卡**看几乎看不出来（只有 Easy 从 8 变 4，前三档都停在 1/2/3）—— 因为最短一天 +
+//     次序各加一天那条地板把它们钉死了。所以这个旋钮是给**已经复习过的**题用的；
+//     新题本来就在一两天内，调它没意义。
+func TestHigherRetentionShortensIntervals(t *testing.T) {
+	now := time.Date(2026, 9, 16, 10, 0, 0, 0, time.Local)
+
+	var prevDays int
+	var prevRate float64
+	for i, r := range []float64{0.90, 0.95, 0.97} {
+		cfg := Config{RequestRetention: r}
+		params := cfg.params(now)
+		sched := fsrs.NewFSRS(params)
+
+		reviewed, at := reviewedCard(sched, now)
+		mature := intervals(sched, reviewed, at, params.MaximumInterval)
+		fresh := intervals(sched, fsrs.NewCard(now), now, params.MaximumInterval)
+
+		t.Logf("保留率 %.2f：新卡 %d/%d/%d/%d 天；复习过的卡 %d/%d/%d/%d 天",
+			r, fresh[0].Days, fresh[1].Days, fresh[2].Days, fresh[3].Days,
+			mature[0].Days, mature[1].Days, mature[2].Days, mature[3].Days)
+
+		good := mature[2].Days
+		if i > 0 && good >= prevDays {
+			t.Errorf("复习过的卡在保留率 %.2f 时 Good 是 %d 天，不比 %.2f 的 %d 天短 —— 方向反了（越高应当越密）",
+				r, good, prevRate, prevDays)
+		}
+		prevDays, prevRate = good, r
 	}
 }
 
