@@ -133,6 +133,9 @@
   .page {
     flex: 0 0 100%;
     scroll-snap-align: start;
+    /* 一次只能翻过一页。默认行为是「甩多快就滚多远」—— 快速一划能连跳两三页，
+       而这一页刚划走、用户还没看清就到了别处。always 让吸附点变成**必须停**的站。 */
+    scroll-snap-stop: always;
     display: grid;
     place-items: center;
   }
