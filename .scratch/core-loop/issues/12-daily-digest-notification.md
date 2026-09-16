@@ -146,6 +146,20 @@ arm / 发完之后把状态**回写**到 `<dataDir>/digest-host.json`，Go 只�
 点完「闹钟和提醒」回来时，排程还是降级的窗口闹钟，只有重排才能换成精确的 —— 官方指引也是这么说的。
 加了 `contentIntent`（点通知回到应用），同样超出清单，理由是不加的话点它什么都不发生。
 
+### 一个真机部署后才发现的缺口：**通知权限从来没有被申请过**
+
+补丁第一版只**检查**通知权限（`notificationsEnabled`），**不申请**。全仓申请 `POST_NOTIFICATIONS`
+的只有两处，都在 `WailsBridge` 里：`postNotification`（Go 经 JNI 调的那条路，我们不走）与
+`startForegroundService`。于是安卓 13+ 上这个权限**永远拿不到** —— 系统不会主动问，而 13 起
+通知默认是关的，结果是这条提醒**永远发不出来**、状态文件一直记 `skipped_no_permission`。
+
+补法照 `maybePromptForExactAlarm` 那套收敛条件（同一份理由）：只在 33+、只在 Activity 上下文、
+只问一次（SharedPreferences 标志）、且只在**真的排上了一条之后**才问。
+
+**顺带补了一个让它确定发生的东西**：光靠应用启动那次 `arm` 可能赶在 Go 写好排程文件之前，
+权限框就弹不出来。所以给 `WailsJSBridge` 加了 `armDigest()`（JS 可调），设置页在
+**`await Digest.Refresh()` 落盘之后**才喊它 —— 顺序要紧，早喊一声宿主读到的就是上一份。
+
 ### 两条留给 Go 侧（已接）
 
 - **`last_result` 为空串是常态**：宿主的约定是「arm 成功不动 `last_result`」，所以文件刚被 arm

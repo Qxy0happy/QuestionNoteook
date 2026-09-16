@@ -110,6 +110,13 @@ final class DigestScheduler {
     /** 引导去系统设置只做一次，记在这里（不写进 digest-host.json：那个文件的形状是 Go 定的）。 */
     private static final String PREFS = "digest_host";
     private static final String PREF_EXACT_PROMPTED = "exact_alarm_prompted";
+    private static final String PREF_NOTIF_PROMPTED = "notif_permission_prompted";
+
+    /**
+     * 申请通知权限用的请求码。**必须挑一个别的代码不用的** —— 脚手架里 1001（JS 主动弹通知）
+     * 与 1003（前台服务）各有主，撞上就会被对面的回调当成自己的结果处理。
+     */
+    private static final int REQ_NOTIFICATIONS = 4101;
 
     private DigestScheduler() {
     }
@@ -208,6 +215,11 @@ final class DigestScheduler {
                 // 只在**真的排上了一条**之后才引导：没东西可发的时候把人丢进系统设置是骚扰。
                 maybePromptForExactAlarm(ctx);
             }
+            // 通知权限也要主动要一次。**不主动要就永远拿不到**：系统不会自己问，而安卓 13 起
+            // 通知默认是关的（官方原话 "notifications are off by default"）。脚手架里唯一会申请
+            // 它的地方是 WailsBridge.postNotification，而那条路是给 JS 主动弹通知用的，我们不走。
+            // 少了这一步，这条提醒会永远发不出来、状态文件只会一直记 skipped_no_permission。
+            maybeRequestNotificationPermission(ctx);
         } catch (Exception e) {
             Log.e(TAG, "排下一次汇总失败", e);
             state.lastResult = "failed";
@@ -401,6 +413,41 @@ final class DigestScheduler {
         } catch (Exception e) {
             Log.w(TAG, "查通知开关失败", e);
             return false;
+        }
+    }
+
+    /**
+     * 申请通知权限（33+）。与精确闹钟那次引导同一套收敛条件，理由也一样：
+     *
+     *   - **只在 Activity 上下文里问** —— arm 也会被 receiver 调到，那种上下文里弹不出权限框，
+     *     白烧掉「只问一次」的那一次机会；
+     *   - **只问一次**（SharedPreferences 标志）。被拒之后再问系统也不会弹，只是骚扰；
+     *   - 调用点只在**真的排上了一条**之后（见 arm），没东西可发时弹框是骚扰。
+     *
+     * 被拒之后的出路是设置页那一行（HostStatus.Note 会说「去系统设置里给错题本打开通知」）——
+     * 通知权限被拒**不影响**其他任何功能。
+     */
+    private static void maybeRequestNotificationPermission(Context ctx) {
+        if (Build.VERSION.SDK_INT < 33) {
+            return; // 13 以下通知默认开着，没有这个权限可申请
+        }
+        if (!(ctx instanceof Activity)) {
+            return;
+        }
+        if (ctx.checkSelfPermission("android.permission.POST_NOTIFICATIONS")
+                == PackageManager.PERMISSION_GRANTED) {
+            return;
+        }
+        SharedPreferences prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+        if (prefs.getBoolean(PREF_NOTIF_PROMPTED, false)) {
+            return;
+        }
+        prefs.edit().putBoolean(PREF_NOTIF_PROMPTED, true).apply();
+        try {
+            ((Activity) ctx).requestPermissions(
+                    new String[]{"android.permission.POST_NOTIFICATIONS"}, REQ_NOTIFICATIONS);
+        } catch (Exception e) {
+            Log.w(TAG, "申请通知权限失败", e);
         }
     }
 

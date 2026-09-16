@@ -7,6 +7,8 @@ import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.MediaStore;
 import android.util.Log;
 import java.io.File;
@@ -36,6 +38,8 @@ public class WailsJSBridge {
 
     private final WailsBridge bridge;
     private final WebView webView;
+    // armDigest 要走主线程 —— AlarmManager 与 requestPermissions 都要求主线程。
+    private static final Handler mainHandler = new Handler(Looper.getMainLooper());
 
     public WailsJSBridge(WailsBridge bridge, WebView webView) {
         this.bridge = bridge;
@@ -105,6 +109,23 @@ public class WailsJSBridge {
                 Log.v(TAG + "/JS", message);
                 break;
         }
+    }
+
+    /**
+     * Ask the host to arm the next daily digest alarm.
+     * Called from JavaScript: wails.armDigest()
+     *
+     * 为什么需要这么一条：Go 写好排程文件之后，**只有 Java 知道**怎么把它变成一个真的闹钟；
+     * 而 Go 与 Java 之间没有调用通道（WailsBridge 上那些能力都是 Go 经 JNI 调的，对应的 Go
+     * 包装在 Wails 模块里）。所以由前端在「排程刚被算出来」这一刻喊一声。
+     *
+     * 顺带，这一次才有机会申请通知权限与引导「闹钟和提醒」—— 宿主那边两者都收敛成
+     * 「只在真的排上了一条、且在 Activity 上下文里、且没问过」才问（见 DigestScheduler）。
+     */
+    @JavascriptInterface
+    public void armDigest() {
+        final Context ctx = webView.getContext();
+        mainHandler.post(() -> DigestScheduler.arm(ctx));
     }
 
     /**
