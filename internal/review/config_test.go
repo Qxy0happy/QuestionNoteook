@@ -256,6 +256,12 @@ func TestSetConfigReportsTheCountdownAndPersists(t *testing.T) {
 func TestSetConfigPullsBackDistantDueDates(t *testing.T) {
 	svc, lib, clk, _ := newServiceWithConfig(t, base)
 	const capDays = 94
+	// 考试日期（本地日历日）。下面算「此刻距考试几天」时用它。
+	const examDateText = "2026-12-19"
+	exam, err := time.Parse("2006-01-02", examDateText)
+	if err != nil {
+		t.Fatalf("考试日期写错了: %v", err)
+	}
 
 	// 两道题：一道正常复习（排在几天后），一道一路 Easy 推到 94 天以外。
 	near := addQuestion(t, lib, "sha256:排得近", base)
@@ -283,14 +289,28 @@ func TestSetConfigPullsBackDistantDueDates(t *testing.T) {
 		t.Errorf("拉回了 %d 道，想要 1 道（只有 far 排在上限之外）", res.PulledBack)
 	}
 
-	// 上限是**按此刻重算**的，不是 base 那天的 94 天：一路 Easy 推下来时钟已经走到了
-	// 11/29，距 12/19 只剩 20 天。这两条一起钉住「上限跟着日期走」这件事。
-	if res.View.DaysToExam != 20 || res.View.MaxIntervalDays != 20 {
-		t.Errorf("此刻距考试 %d 天、生效上限 %d 天，都该是 20 天",
-			res.View.DaysToExam, res.View.MaxIntervalDays)
+	// 上限是**按此刻重算**的，不是 base 那天的 94 天：一路 Easy 推下来时钟已经走远了。
+	//
+	// 天数要**算出来**，不能写死：它是「最后复习那一刻距考试还有几天」，而那个位置由 FSRS
+	// 的间隔序列决定 —— 保留率的默认值一改（0.90 → 0.95），序列就变、落点就变。
+	// 这条断言第一版写死了「20」，改默认值那天就炸了。现在它只要求：
+	// **视图里的天数 == 按最后复习时刻算出来的天数**，而那正是「按此刻重算」这句话。
+	//
+	// 口径与 Go 侧逐字相同（见 Config.daysToExam）：取**本地日历日**的零点，
+	// 两边都落到 UTC 零点再相减 —— 差因此是 24 小时的整数倍。
+	y, m, d := farReviewedAt.In(zone).Date()
+	wantDays := int(exam.Sub(time.Date(y, m, d, 0, 0, 0, 0, time.UTC)).Hours() / 24)
+	if res.View.DaysToExam != wantDays || res.View.MaxIntervalDays != wantDays {
+		t.Errorf("此刻距考试 %d 天、生效上限 %d 天，都该是 %d 天（最后复习在 %v，考试 %v）",
+			res.View.DaysToExam, res.View.MaxIntervalDays, wantDays,
+			farReviewedAt.Format(time.DateOnly), examDateText)
+	}
+	if wantDays >= capDays {
+		t.Fatalf("前提不成立：此刻距考试 %d 天，而 far 的间隔是 %d 天 —— "+
+			"这么算它根本没超上限，这条测试就白测了", wantDays, farBefore.scheduledDays)
 	}
 
-	// far：到期日被拉到「此刻 + 20 天」，也就是考试那一天。
+	// far：到期日被拉到「此刻 + 生效上限」，也就是**考试那一天**。
 	farAfter := stateOf(t, lib, far.ID)
 	wantDue := farReviewedAt.Add(time.Duration(res.View.MaxIntervalDays) * 24 * time.Hour).UTC()
 	if !farAfter.due.Equal(wantDue) {

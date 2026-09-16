@@ -20,7 +20,7 @@ jobs:
     name: Go（build / vet / test）
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # 版本从 go.mod 读，不在这儿再写一遍 —— 两处版本号迟早会对不上，
       # 而对不上的那天，红的是「本地能过、CI 不能过」这种最难查的错。
@@ -28,6 +28,14 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
+
+      # main.go 上有一条 `//go:embed all:frontend/dist`，而干净克隆里那个目录不存在
+      # （它是构建产物、在 .gitignore 里）—— 于是 `go build ./...` 连编译都过不去：
+      # "pattern all:frontend/dist: no matching files found"。
+      #
+      # 这一层测的是 Go 代码，不关心前端内容，所以放一个占位目录进去就够了
+      # （真那份由前端作业与 Android 作业各自去构建）。没有任何 Go 测试读它。
+      - run: mkdir -p frontend/dist && printf '<!doctype html>\n' > frontend/dist/index.html
 
       - run: go build ./...
       - run: go vet ./...
@@ -44,7 +52,7 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       # pnpm 的版本与本地一致（12.4.2）：锁文件的格式跟着它走，版本不同会
       # 让 --frozen-lockfile 直接失败，而那种失败看起来像「代码坏了」。
@@ -70,9 +78,14 @@ jobs:
   # 本地没有任何东西会红，所以这条放在 CI 上。
   bindings:
     name: 绑定（生成结果是最新的）
-    runs-on: ubuntu-latest
+    # 跑在 **Windows** 上，不是在 ubuntu 上：wails3 这个 CLI 在 Linux 下要
+    # gtk4 / webkitgtk-6.0 的开发包才编得出来（第一次跑就是这么红的：
+    # "Package gtk4 was not found in the pkg-config search path"），
+    # 而它在 Windows 上不需要那些东西。顺带一句：这份绑定正是在 Windows 上
+    # 验证过「重新生成之后零差异」的，所以这条检查与那次验证是同一个环境。
+    runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -81,10 +94,14 @@ jobs:
       # 版本与本地、与 build/Taskfile.yml 里那套一致。
       - run: go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.22
 
+      # shell 指定 bash：Windows runner 默认是 PowerShell，而它会**把空参数丢掉** ——
+      # `-f ''` 会变成没有，后面那个 -clean=true 就被当成 -f 的值了。
       - name: 重新生成一遍
+        shell: bash
         run: wails3 generate bindings -f '' -clean=true -ts -i
 
       - name: 与仓库里那份比对
+        shell: bash
         run: |
           git diff --stat -- frontend/bindings
           git diff --exit-code -- frontend/bindings
@@ -99,7 +116,7 @@ jobs:
     name: Android（.so + APK）
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
@@ -108,9 +125,23 @@ jobs:
         with:
           distribution: temurin
           java-version: '21'
-      - uses: android-actions/setup-android@v3
+
+      # wails3 这个 CLI 自己依赖 gtk4 / webkitgtk-6.0 的开发包 —— 即使这一趟只跑安卓的
+      # 任务，也得先把 CLI 编出来。缺了它 `go install` 会以
+      # "Package gtk4 was not found in the pkg-config search path" 失败。
+      - name: 装 wails3 CLI 在 Linux 上要的那两个开发包
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev
+
+      # 不用 android-actions/setup-android：它内部那句 sdkmanager 在这些 runner 上
+      # 会因为「找不到 tools 包」直接失败（那个包在新版 SDK 仓库里已经没有了，第一次
+      # 跑就是这么红的）。ubuntu 镜像里本来就装好了 Android SDK，sdkmanager 就在 PATH 上。
       # NDK 的版本写死：Taskfile 挑的是「装得最新的那个」，CI 上装几个就会挑错。
-      - run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973"
+      - name: 装 NDK 与 platform
+        run: |
+          sdkmanager --version
+          yes | sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973"
       - uses: pnpm/action-setup@v4
         with:
           version: 12.4.2
