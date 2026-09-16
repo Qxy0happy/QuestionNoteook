@@ -21,6 +21,8 @@
   // 四档的名字（与「数值 → 名字」那一步）只在 ratings.ts 里写一遍，
   // 设置页的四档间隔预览用的是同一份。
   import { RATINGS, ratingLabel } from './ratings';
+  // 放大（捏合 + 拖动）与题库详情页共用同一份手势实现。
+  import { pinchZoom, ZOOMED_AT } from './zoom';
 
   let root = $state<HTMLElement | null>(null);
 
@@ -33,6 +35,11 @@
 
   let loading = $state(false);
   let listError = $state('');
+
+  // 放大。手势本身在 zoom.ts 里，这里只用它的回调记一下「放大没有」—— 放大时得把溢出裁掉，
+  // 否则放大的那半张会盖到另一张图上（或者底部那排评级按钮上）。
+  let qZoomed = $state(false);
+  let aZoomed = $state(false);
 
   // 今天建议再做几道（由 VLM 看着「还剩多少道」与「最近表现」给）。null = 没有推荐 ——
   // 没配 VLM、断网、模型答得不能用，或者今天压根没到期题，这几种情况在这一页上是同一件事：
@@ -297,7 +304,14 @@
     <!-- 题图占满中间，自己滚；评级条钉在下面，单手也够得着。
          宽屏上评完答案图并到右边，题图与答案对着看。 -->
     <div class="stage" class:side={answerUrl !== null}>
-      <figure class="shot">
+      <figure
+        class="shot"
+        class:zoomed={qZoomed}
+        use:pinchZoom={{
+          resetKey: current?.Question.ID,
+          onChange: (st) => (qZoomed = st.scale > ZOOMED_AT),
+        }}
+      >
         {#if questionUrl}
           <img src={questionUrl} alt="题图" />
         {:else if questionError}
@@ -308,7 +322,13 @@
       </figure>
 
       {#if result && current.Question.AnswerHash}
-        <figure class="shot answer">
+        <!-- 答案图是评完才出现的，所以这块整个是新的 DOM —— 手势从「铺满看全」重新开始，
+             不必给 resetKey。 -->
+        <figure
+          class="shot answer"
+          class:zoomed={aZoomed}
+          use:pinchZoom={{ onChange: (st) => (aZoomed = st.scale > ZOOMED_AT) }}
+        >
           {#if answerUrl}
             <img src={answerUrl} alt="答案图" />
           {:else if answerError}
@@ -479,6 +499,11 @@
   /* 答案图那半张压一档亮度：对照时眼睛该落在题图上。 */
   .shot.answer img {
     opacity: 0.92;
+  }
+  /* 放大之后把溢出裁掉：transform 不改布局，不裁的话放大的那半张会盖到另一张图上，
+     还会把 .stage 那条滚动条撑出来。 */
+  .shot.zoomed {
+    overflow: hidden;
   }
 
   .foot {

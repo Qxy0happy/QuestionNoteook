@@ -123,6 +123,15 @@ public class MainActivity extends AppCompatActivity {
         settings.setMediaPlaybackRequiresUserGesture(false);
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
 
+        // 关掉 WebView 自带的整页缩放（题图的放大是我们自己做的，见前端 src/zoom.ts）。
+        //
+        // 不关的话，双指捏合会去缩**整个页面** —— 导航栏、列表、按钮一起放大，而那正是
+        // 用户不想要的；更糟的是那一套在合成器里，我们的 touchmove 拦不住它，两边会打架。
+        // 它与 index.html 那个 viewport（user-scalable=no）是**两处都得有**：viewport 管
+        // 页面的意愿，这两行管 WebView 的能力，只有一处生效时行为随版本而变。
+        settings.setSupportZoom(false);
+        settings.setBuiltInZoomControls(false);
+
         // Enable debugging in debug builds
         if (DEBUG) {
             WebView.setWebContentsDebuggingEnabled(true);

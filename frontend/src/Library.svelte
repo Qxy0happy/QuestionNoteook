@@ -21,6 +21,8 @@
   // 去阴影的算法单独一个纯函数模块（enhance.ts）：它不碰 canvas、只吃一块 RGBA 像素，
   // 所以能脱离浏览器单独量 —— 见下面 refreshEnhanced 上那段注释。
   import { enhanceInPlace } from './enhance';
+  // 放大（捏合 + 拖动）也是单独一个模块（zoom.ts），题库与复习两页共用同一份手势。
+  import { pinchZoom, ZOOMED_AT } from './zoom';
 
   // 三页是同时挂载的，切到这一页才值得拉一次数据。
   // 题库页发起的「补拍答案图」：把这道题交给上层（App），由它切到取景页并进入补拍模式。
@@ -71,6 +73,20 @@
   let enhanceMs = $state(0);
   let enhanceAlgoMs = $state(0);
   let enhanceError = $state('');
+
+  // ── 放大（双指捏合 / 放大后单指拖动）──
+  //
+  // 手势本身在 zoom.ts 里（那边写着三条仲裁规矩），这里只管两件跟它有关的事：
+  // 放大时裁掉溢出，以及把增强过的那一版换成按**原图**算的。
+  let qZoomed = $state(false);
+  let aZoomed = $state(false);
+  // 「这一版增强图是按原图算的」。按**显示尺寸**算的那版只有屏幕那么大（见 capFor），
+  // 放大两三倍看到的就是插值的糊，所以要换一版；换过就不降级（缩回去看只会更清楚）。
+  let qShotFull = $state(false);
+  let aShotFull = $state(false);
+  // 读原图尺寸用的（那一版按 naturalWidth/Height 算）。没加载出来时是 null。
+  let qImgEl = $state<HTMLImageElement | null>(null);
+  let aImgEl = $state<HTMLImageElement | null>(null);
 
   // 舞台的 CSS 像素尺寸。bind:clientWidth/Height 自带 ResizeObserver，转屏、拖窗口
   // 都会跟着更新 —— 但**只在开关拨动的那一刻读一次**（见 capFor），不做 resize 重算：
@@ -296,6 +312,12 @@
     enhanceMs = 0;
     enhanceAlgoMs = 0;
     enhanceError = '';
+    // 放大也一样按题重置：换一道题就该从「铺满看全」开始（transform 归位那一步由 action 的
+    // resetKey 负责，这里只管我们自己记着的两个标志）。
+    qZoomed = false;
+    aZoomed = false;
+    qShotFull = false;
+    aShotFull = false;
     void loadTags(q.ID);
     void refreshEnhanced();
     openedUrl = cards.get(q.QuestionHash) ?? null;
@@ -380,6 +402,29 @@
     return { w: Math.max(1, Math.round(nw * scale)), h: Math.max(1, Math.round(nh * scale)) };
   }
 
+  // 这一版该按哪个尺寸算：`full` 为真就按**原图**算（用户放大过，屏幕那么大的一版不够看了），
+  // 否则按显示的设备像素算（快，且屏幕上看不出差别）。
+  //
+  // 注意这里给的是「框」而不是「尺寸」：capFor 会把这个框乘上 DPR 再与原图比，所以传原图尺寸
+  // 进去等于要 1:1 —— 上限仍然由 MAX_PIXELS 兜着（那个是防超大图的，与这里无关）。
+  function boxFor(full: boolean, el: HTMLImageElement | null, w: number, h: number): [number, number] {
+    if (full && el && el.naturalWidth > 0) return [el.naturalWidth, el.naturalHeight];
+    return [w, h];
+  }
+
+  // 放大过头之后把增强图换成按原图算的那一版。
+  //
+  // 为什么非换不可：按显示尺寸算的那版**只有屏幕那么大**（这是票据 17 里量出来的省时间做法），
+  // 放大两三倍看到的就是插值的糊 —— 而那正是用户放大要避开的东西。
+  // 每个槽位只换一次（换过就不再降级：缩回去看只会更清楚，也省一次重算）。
+  function upgradeShot(slot: 'q' | 'a', zoomed: boolean) {
+    if (!zoomed) return;
+    if (slot === 'q' ? qShotFull : aShotFull) return;
+    if (slot === 'q') qShotFull = true;
+    else aShotFull = true;
+    void refreshEnhanced();
+  }
+
   // 把一张图算成增强版，返回能直接塞进 <img> 的 blob URL 与这一趟的毫秒数。
   //
   // 三步：原生解码（Image.decode）→ 缩到目标尺寸的画布（drawImage，浏览器做的，
@@ -448,13 +493,16 @@
     if (!enhance) {
       void swapShot('q', null);
       void swapShot('a', null);
+      // 放掉的同时把「按原图算的那一版」这个档位也退回默认：下一回打开是全新的一个看法。
+      qShotFull = false;
+      aShotFull = false;
       return;
     }
     if (!opened) return;
 
     if (openedUrl) {
       try {
-        const r = await enhanceForDisplay(openedUrl, stageW, stageH);
+        const r = await enhanceForDisplay(openedUrl, ...boxFor(qShotFull, qImgEl, stageW, stageH));
         if (token !== shotToken) {
           URL.revokeObjectURL(r.url); // 这次的结果已经过时，别留在内存里
           return;
@@ -475,7 +523,10 @@
     // 答案图只在它正摊开着的时候算：没显示的东西没必要花这份时间（它可能是半张纸的像素）。
     if (showAnswer && answerUrl) {
       try {
-        const r = await enhanceForDisplay(answerUrl, aStageW || stageW, aStageH || stageH);
+        const r = await enhanceForDisplay(
+          answerUrl,
+          ...boxFor(aShotFull, aImgEl, aStageW || stageW, aStageH || stageH),
+        );
         if (token !== shotToken) {
           URL.revokeObjectURL(r.url);
           return;
@@ -658,6 +709,8 @@
     enhanceMs = 0;
     enhanceAlgoMs = 0;
     enhanceError = '';
+    qShotFull = false;
+    aShotFull = false;
     void refreshEnhanced();
     closeTagging();
   }
@@ -773,9 +826,21 @@
 
     <!-- bind:clientWidth/Height 自带 ResizeObserver，拨开关那一刻读的就是舞台上真实的尺寸。
          qShot 还没算好（或这一趟失败了）时 src 落回 openedUrl —— 显示的是原图，不是空白。 -->
-    <div class="stage" bind:clientWidth={stageW} bind:clientHeight={stageH}>
+    <div
+      class="stage"
+      class:zoomed={qZoomed}
+      bind:clientWidth={stageW}
+      bind:clientHeight={stageH}
+      use:pinchZoom={{
+        resetKey: opened?.ID,
+        onChange: (st) => {
+          qZoomed = st.scale > ZOOMED_AT;
+          upgradeShot('q', qZoomed);
+        },
+      }}
+    >
       {#if openedUrl}
-        <img src={enhance && qShot ? qShot : openedUrl} alt="题图" />
+        <img bind:this={qImgEl} src={enhance && qShot ? qShot : openedUrl} alt="题图" />
       {:else if openedError}
         <p class="hint error">{openedError}</p>
       {:else}
@@ -787,9 +852,21 @@
       <!-- 摊在题图下面，两块各分一半高度，对着看（复习页宽屏上也是这个排法）。
            三种状态与题图一模一样：有图 / 取不到（文件被清理）/ 还在取。
            增强开着时它跟着一起增强 —— 对着看的就该是同一个「看法」。 -->
-      <div class="stage answer" bind:clientWidth={aStageW} bind:clientHeight={aStageH}>
+      <div
+        class="stage answer"
+        class:zoomed={aZoomed}
+        bind:clientWidth={aStageW}
+        bind:clientHeight={aStageH}
+        use:pinchZoom={{
+          resetKey: opened?.ID,
+          onChange: (st) => {
+            aZoomed = st.scale > ZOOMED_AT;
+            upgradeShot('a', aZoomed);
+          },
+        }}
+      >
         {#if answerUrl}
-          <img src={enhance && aShot ? aShot : answerUrl} alt="答案图" />
+          <img bind:this={aImgEl} src={enhance && aShot ? aShot : answerUrl} alt="答案图" />
         {:else if answerError}
           <p class="hint error">{answerError}</p>
         {:else}
@@ -1198,6 +1275,11 @@
   /* 答案图摊开时与题图各占一半（两块都是 flex:1），中间画一条线分开。 */
   .stage.answer {
     border-top: 1px solid rgba(244, 246, 251, 0.1);
+  }
+  /* 放大之后把溢出裁掉：transform 不改布局，不裁的话放大的那部分会盖到相邻的元素上，
+     还会把外层滚动条撑出来 —— 而它本来只是「同一块地方的放大镜」。 */
+  .stage.zoomed {
+    overflow: hidden;
   }
   .stage img {
     max-width: 100%;

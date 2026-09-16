@@ -2,7 +2,13 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!-- user-scalable=no / maximum-scale=1：不让浏览器缩**整个页面**。题图的放大是我们
+         自己做的（src/zoom.ts 里那次 CSS transform），页面级缩放会跟它抢同一个手势 ——
+         而且是缩导航栏和列表，不是缩图。与 MainActivity 里那两行 setSupportZoom 配套。 -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1, user-scalable=no, viewport-fit=cover"
+    />
     <link rel="stylesheet" href="/style.css" />
     <title>错题本</title>
   </head>
