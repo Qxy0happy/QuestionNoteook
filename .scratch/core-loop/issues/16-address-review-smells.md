@@ -62,6 +62,21 @@
 名字说的就是它做的事；`capture.Rectify` 只剩包级那个纯函数。全仓 grep 确认没有
 `func (s *Service) Rectify`。
 
+### 6. 后来补的一条：手抄的 DROP 清单（同一类问题，第 5 条不做之后长出来的）
+
+三个包里的 `TestUpgradeFromOlderSchema` 要**扮演**一个老库，各自手抄了一份「把之后每条迁移建的表删掉」
+的清单。每加一条迁移，就要记得回来补 N 行 —— 这件事被**漏掉过四次**（迁移 3、4、5 各一次）。
+漏了的后果不是报错本身，而是「扮演的老库」根本没扮演对：那个年代不该有的表还在里面，
+于是那条测试**静默地**在测一个假场景。
+
+改法：`migration` 结构加一个 `tables` 字段声明「这条迁移建了哪些表」，
+`library.TablesIntroducedAfter(version)` 汇总，三处测试改成调它。
+清单不是「又一份靠自觉维护的名单」—— `internal/library/migrations_test.go` 双向盯着它
+（声明了却建不出来会红；建了却没声明也会红，靠数 `CREATE TABLE` 的出现次数，不靠解析 SQL 名字）。
+
+顺带撤掉了一个因它而生的绕法：迁移 5 原先带 `IF NOT EXISTS`（为了绕过清单漏了它），
+那是真的弱化 —— 与前面四条一样改回裸 `CREATE TABLE` 了。
+
 ### 顺手看见、没做的（不在票里）
 
 `build/android/Taskfile.yml` 里 `assemble:apk` / `assemble:apk:release` / `assemble:aab` /

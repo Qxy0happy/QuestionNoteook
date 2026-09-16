@@ -49,6 +49,26 @@ export function Ask(questionID: number, history: $models.Message[] | null): $Can
 }
 
 /**
+ * AskText 是「问模型一句**不带图**的话」这条接缝 —— 推荐今日复习量走它。
+ * 
+ * 为什么与 Ask 分开、而不是给它加一个「这次不带图」的开关：两条路要的东西不一样。
+ * 讨论必然带图，于是要读题图与答案图、要过那份 hash → file_id 的上传缓存；这条路手上
+ * 只有几个数，没有图可传，那套东西一样都用不上。合在一起就得在 Ask 里到处问「这次有图吗」。
+ * 
+ * 走的是配置里的**文本模型**那一路（Config.modelFor）：视觉模型带 Exp 后缀、官方声明可能
+ * 被替换，而推荐复习量这种纯文本的活不该跟着它一起冒险 —— 这正是 Config.TextModel 留着
+ * 的原因（它的注释里点名了「推荐今天做几道」）。文本模型没配时回落到视觉模型，见 textModel。
+ * 
+ * 回答要求是 JSON 对象：这条路眼下唯一的用处是「要一个数」，而散文里挑数是挑不出来的。
+ * 将来有别的纯文本活要自由文本（比如 agent 那边的整理），再加旋钮，现在不猜。
+ * 
+ * 没配 VLM 返回 ErrNotConfigured；网络与凭据的问题由 provider 原样报上来。
+ */
+export function AskText(system: string, user: string): $CancellablePromise<$models.Reply> {
+    return $Call.ByID(11313647, system, user);
+}
+
+/**
  * Config 返回配置的「界面版」：**不含凭据的值**，只说有没有、多长。
  */
 export function Config(): $CancellablePromise<$models.ConfigView> {

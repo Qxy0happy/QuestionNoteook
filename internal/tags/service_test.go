@@ -831,20 +831,17 @@ func TestUpgradeFromOlderSchema(t *testing.T) {
 	// 把库退回票据 05 的形状：标签表还没建、版本号停在 1。
 	// 这是测试在**扮演**一个老库文件，不是绕过服务层的实现细节。
 	//
-	// 每加一条新迁移，这里就要把那条迁移建的**表**也删掉（像下面 review 那两张）：
-	// 退回的是「那个年代真实存在过的库」，而不是「只少了标签表的库」。漏掉的话，
-	// 重开时那条迁移会撞上已经存在的表。
-	for _, stmt := range []string{
-		`DROP TABLE question_tags`,
-		`DROP TABLE tags`,
-		`DROP TABLE review_logs`,
-		`DROP TABLE review_states`,
-		`DROP TABLE discussions`, // 迁移 4（票据 10）
-		`PRAGMA user_version = 1`,
-	} {
-		if _, err := lib.DB().Exec(stmt); err != nil {
-			t.Fatalf("退回老模式 (%s): %v", stmt, err)
+	// 要删的表从迁移表推出来，不在这儿手抄。
+	//
+	// 手抄过四轮，每轮都漏（迁移 3、4、5 各一次）。漏了的后果不是报错本身 ——
+	// 是「扮演的老库」根本没扮演对：那个年代的库里不该有那张表，而它还在。
+	for _, tbl := range library.TablesIntroducedAfter(1) {
+		if _, err := lib.DB().Exec(`DROP TABLE ` + tbl); err != nil {
+			t.Fatalf("退回老模式 (DROP TABLE %s): %v", tbl, err)
 		}
+	}
+	if _, err := lib.DB().Exec(`PRAGMA user_version = 1`); err != nil {
+		t.Fatalf("退回老模式 (PRAGMA user_version = 1): %v", err)
 	}
 	if err := lib.Close(); err != nil {
 		t.Fatalf("Close: %v", err)

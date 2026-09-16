@@ -9,6 +9,9 @@
   import * as Review from '../bindings/questionbook/internal/review/service';
   import { Rating } from '../bindings/questionbook/internal/review/models';
   import type { QueueItem, ReviewResult } from '../bindings/questionbook/internal/review/models';
+  import * as Workload from '../bindings/questionbook/internal/workload/service';
+  import * as Digest from '../bindings/questionbook/internal/digest/service';
+  import type { Recommendation } from '../bindings/questionbook/internal/workload/models';
   import * as Library from '../bindings/questionbook/internal/library/service';
   import * as Tags from '../bindings/questionbook/internal/tags/service';
   import { Level } from '../bindings/questionbook/internal/tags/models';
@@ -27,6 +30,26 @@
 
   let loading = $state(false);
   let listError = $state('');
+
+  // 今天建议再做几道（由 VLM 看着「还剩多少道」与「最近表现」给）。null = 没有推荐 ——
+  // 没配 VLM、断网、模型答得不能用，或者今天压根没到期题，这几种情况在这一页上是同一件事：
+  // 不显示这一条。推荐是锦上添花，它拿不到时队列照常工作。
+  let rec = $state<Recommendation | null>(null);
+  // 用户采纳之后的那道闸：今天只做 cap 道。**0 = 没有闸**（不采纳，或者压根没推荐）。
+  //
+  // 闸只存在于这一页的内存里：队列本身一个字节都没被改（见 Go 侧的 internal/workload），
+  // 所以「不采纳 = 回到纯 FSRS」不是一句承诺，而是「什么都没发生」。
+  let cap = $state(0);
+  // 采纳之后已经评了几道。闸是「再做 cap 道」，所以数的是从采纳那一刻起的新账。
+  let done = $state(0);
+
+  // 「还剩多少道」。有闸时它取闸与队列里较小的那个 —— 队列本身不会因为闸而变短。
+  const remaining = $derived(cap > 0 ? Math.min(queue.length, Math.max(0, cap - done)) : queue.length);
+  // 到量了：闸卡住了，但队列里还有题（队列空的时候走的是「今天没有要复习的题」那一屏）。
+  //
+  // 还要求 current 为 null：做完闸里的最后一道时，那一道的答案图与标签正显示在屏幕上，
+  // 不该被这一屏顶掉（要等用户按了「下一题」）。showNext 里那条同样的判断负责把它们收起来。
+  const finished = $derived(cap > 0 && done >= cap && queue.length > 0 && current === null);
 
   let questionUrl = $state<string | null>(null);
   let questionError = $state('');
@@ -70,6 +93,9 @@
       queue = (await Review.Queue()) ?? [];
       listError = '';
       showNext();
+      // 推荐**不等**：它是另一次网络往返（Go 侧要去问模型），队列不该为它多转一会儿。
+      // 拿回来时页面早就画好了，那条建议自己冒出来就行。
+      void loadRecommendation();
     } catch (err) {
       listError = errorMessage(err);
     } finally {
@@ -94,6 +120,19 @@
 
   // 端上队头那一道。队列空了就停在「今天做完了」。
   function showNext() {
+    // 到量了就停在这儿。队列里还有题，但今天按建议已经够了 —— 想接着做，收工那一屏上
+    // 有一个把闸摘掉的按钮。
+    if (cap > 0 && done >= cap) {
+      current = null;
+      result = null;
+      answerUrl = null;
+      answerError = '';
+      tags = [];
+      questionUrl = null;
+      questionError = '';
+      return;
+    }
+
     const next = queue[0] ?? null;
     current = next;
     result = null;
@@ -115,6 +154,14 @@
       result = res;
       // 做完的从本次队列里移走：「还剩 N 道」当场减一，它也不会再被端上来。
       queue = queue.filter((q) => q.Question.ID !== item.Question.ID);
+      // 采纳过推荐的话，这一道也算进今天那道闸里。
+      if (cap > 0) done += 1;
+      // 评完一道顺手把宿主那份排程重算一遍：评过的题被推到以后了，明天那条汇总的数字
+      // 得跟着变。不重算的话，只要用户不打开设置页，排程就只在应用启动那一刻算过一次。
+      //
+      // 有三处机会兜着它（启动时、退到后台时、以及这里），所以漏一次是自愈的。
+      // 静默失败：排程旧一点，比弹一个用户没法处理的错误好。
+      void Digest.Refresh().catch(() => {});
       // 答案图与标签这时候才取 —— 评完才有可对照的东西。
       void loadAnswer(item);
       void loadTags(item.Question.ID);
@@ -176,13 +223,50 @@
   function goNext() {
     showNext();
   }
+
+  // 问一次「今天建议再做几道」。
+  //
+  // **失败是静默的**：没配 VLM、断网、模型答得不能用，都只是这一条不出现而已 ——
+  // 队列、评级、FSRS 那一条链一点不受影响。所以这里刻意不写 listError：
+  // 那个位置留给「复习本身坏了」，把推荐的问题混进去会让用户以为复习不能用了。
+  async function loadRecommendation() {
+    // 已经采纳过了：今天不再问第二次（用户已经定了，再问一次只是白花一次调用）。
+    if (cap > 0) return;
+    try {
+      const r = await Workload.Recommend();
+      // Suggest 为 0 表示没有可推荐的（队列已经空了）—— 与拿不到推荐一样，什么都不显示。
+      rec = r && r.Suggest > 0 ? r : null;
+    } catch {
+      rec = null;
+    }
+  }
+
+  // 采纳：今天只做这么多。队列一动不动 —— 这道闸从头到尾只是这一页内存里的一个数。
+  function acceptRec() {
+    if (!rec) return;
+    cap = rec.Suggest;
+    done = 0;
+    rec = null;
+  }
+
+  // 不采纳：这一条不再出现。此后这一页的行为与没有推荐时逐字相同。
+  function dismissRec() {
+    rec = null;
+  }
+
+  // 把闸摘掉，接着做完剩下的。
+  function clearCap() {
+    cap = 0;
+    done = 0;
+    showNext();
+  }
 </script>
 
 <div class="review" bind:this={root}>
   <header class="bar">
     <span class="bar-title">复习</span>
     {#if current}
-      <span class="count">还剩 {queue.length} 道</span>
+      <span class="count">还剩 {remaining} 道</span>
     {/if}
   </header>
 
@@ -190,8 +274,31 @@
     <p class="banner">{listError}</p>
   {/if}
 
+  <!-- 今天建议再做几道（story 25）。它是**一道闸**，不是新的到期时间：采纳只是让这一页
+       在 cap 道之后停下来，库里的到期时刻一个都没动，不采纳则等于这一条不存在。 -->
+  {#if cap > 0 && !finished}
+    <div class="rec">
+      <span class="rec-text">按建议做 {cap} 道 · 已完成 {done}</span>
+      <button class="rec-btn" onclick={clearCap}>继续做完</button>
+    </div>
+  {:else if rec}
+    <div class="rec">
+      <span class="rec-text">
+        今天建议再做 <strong>{rec.Suggest}</strong> 道{rec.Reason ? ` · ${rec.Reason}` : ''}
+      </span>
+      <button class="rec-btn" onclick={acceptRec}>就做这么多</button>
+      <button class="rec-btn ghost" onclick={dismissRec}>不用</button>
+    </div>
+  {/if}
+
   {#if loading && !current}
     <p class="hint">正在读复习队列…</p>
+  {:else if finished}
+    <div class="empty">
+      <p class="empty-main">今天做满 {cap} 道了</p>
+      <p class="empty-sub">按建议收工。剩下的 {queue.length} 道还在，想接着做随时可以。</p>
+      <button class="primary" onclick={clearCap}>继续做剩下的 {queue.length} 道</button>
+    </div>
   {:else if !current}
     <div class="empty">
       <p class="empty-main">今天没有要复习的题</p>
@@ -295,6 +402,47 @@
   .count {
     font-size: 0.85rem;
     color: rgba(244, 246, 251, 0.5);
+  }
+
+  /* 推荐条：夹在标题栏与题图之间，窄窄一条。它随时可能整个不渲染（拿不到推荐时），
+     所以这里不能有任何「撑住布局」的职责。 */
+  .rec {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.5rem 1rem;
+    background: rgba(130, 200, 255, 0.1);
+    border-bottom: 1px solid rgba(130, 200, 255, 0.2);
+  }
+  .rec-text {
+    flex: 1;
+    font-size: 0.82rem;
+    line-height: 1.35;
+    color: rgba(159, 212, 255, 0.95);
+  }
+  .rec-btn {
+    flex: none;
+    padding: 0.35rem 0.6rem;
+    border: 1px solid rgba(130, 200, 255, 0.5);
+    border-radius: 0.6rem;
+    background: rgba(130, 200, 255, 0.16);
+    color: #9fd4ff;
+    font: inherit;
+    font-size: 0.78rem;
+    cursor: pointer;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    --wails-draggable: no-drag;
+  }
+  .rec-btn:active {
+    background: rgba(130, 200, 255, 0.3);
+  }
+  /* 「不用」比「就做这么多」轻一档：采纳是主路，但不采纳也不必躲着。 */
+  .rec-btn.ghost {
+    border-color: rgba(244, 246, 251, 0.24);
+    background: transparent;
+    color: rgba(244, 246, 251, 0.7);
   }
 
   .stage {

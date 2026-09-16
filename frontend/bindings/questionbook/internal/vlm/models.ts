@@ -135,6 +135,25 @@ export interface Message {
      * 类型上没拦这一条（拦了就得为每种能带图的角色各造一个类型），由 Service 拼消息时守住。
      */
     "Images": Image[] | null;
+
+    /**
+     * ToolCalls 非空表示这条 assistant 消息的内容是「模型要求调用这几个工具」。
+     * 多轮之间要**原样**带回去（见本包的包注释：先 append 它，再 append 每条工具结果）。
+     */
+    "ToolCalls": ToolCall[] | null;
+
+    /**
+     * ToolCallID 只在 RoleTool 的消息上有值：它在回答哪一次调用。
+     */
+    "ToolCallID": string;
+
+    /**
+     * Reasoning 是思考模式下的推理过程（线上叫 reasoning_content）。
+     * 官方那份思考模式的工具调用示例是把整条 assistant 消息整个 append 回去的，
+     * 于是推理过程也跟着走了；我们这边是自己拼报文（不是转发原对象），所以得显式带着它，
+     * 免得下一轮因为少了一块而被服务方退回。
+     */
+    "Reasoning": string;
 }
 
 /**
@@ -157,10 +176,21 @@ export interface ProposedTag {
  */
 export interface Reply {
     "Text": string;
+
+    /**
+     * ToolCalls 非空表示模型没有直接回答，而是要调用这几个工具。
+     * 这时 Text 通常是空的，但两者并不互斥 —— 模型可以边说边调。
+     */
+    "ToolCalls": ToolCall[] | null;
+
+    /**
+     * Reasoning 是思考模式下那段推理过程，见 Message.Reasoning。
+     */
+    "Reasoning": string;
 }
 
 /**
- * Role 是一条消息的角色。取值直接就是线上报文里的样子（user / assistant / system），
+ * Role 是一条消息的角色。取值直接就是线上报文里的样子（user / assistant / system / tool），
  * 不另立一套自己的枚举再到实现里翻译一遍 —— 这一层抽象要挡的差异不在这里。
  */
 export enum Role {
@@ -172,6 +202,12 @@ export enum Role {
     RoleSystem = "system",
     RoleUser = "user",
     RoleAssistant = "assistant",
+
+    /**
+     * RoleTool 是「这是某次工具调用的结果」那条消息。它必须带着 ToolCallID（线上叫
+     * tool_call_id），把结果挂回模型发起的那一次调用上；图片不能挂在这种消息上。
+     */
+    RoleTool = "tool",
 };
 
 /**
@@ -200,4 +236,28 @@ export interface TagSuggestion {
      * 真正的调用失败（没配置、网络、401）仍然是 error，走的仍是另一条路。
      */
     "Problem": string;
+}
+
+/**
+ * ToolCall 是模型要求的一次工具调用。
+ */
+export interface ToolCall {
+    /**
+     * ID 是这次调用的标识（线上是 id）。喂回结果时要原样带上 —— 它就是 tool_call_id。
+     */
+    "ID": string;
+
+    /**
+     * Name 是模型挑中的工具名。
+     */
+    "Name": string;
+
+    /**
+     * Arguments 是模型生成的参数，**一个 JSON 字符串**而不是解析好的对象。
+     * 
+     * 为什么不在这里替它解成 map：官方文档明说模型「不总是生成合法 JSON」。
+     * 解析失败是一件**要喂回模型让它重试**的事（连同哪一段解不开），不是这一层的故障 ——
+     * 在这里解就等于把一个可纠正的错误升格成一次调用失败。
+     */
+    "Arguments": string;
 }

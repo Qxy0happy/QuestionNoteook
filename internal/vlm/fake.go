@@ -23,7 +23,16 @@ type Fake struct {
 
 	// Replies 是 Chat 依次返回的文本；用完最后一条就一直重复它。
 	// 空的话返回一句默认的、形状正确的 JSON，好让只关心别的东西的测试不必每次都塞一句。
+	//
+	// 它只表达得了「一句话」，多轮形状（先回一串工具调用、再回一句话）用 Turns。
 	Replies []string
+
+	// Turns 是一整轮一整轮的回答（文本 + 工具调用 + 推理过程），优先于 Replies；
+	// 用完最后一条就一直重复它。
+	//
+	// 工具调用循环必须能这么摆：第一轮模型要调三个工具、第二轮才说话 ——
+	// 只给字符串的 Replies 摆不出这个形状。
+	Turns []Reply
 
 	// UploadIDs 是 Upload 依次返回的引用；用完就按图的 hash 现编一个。
 	UploadIDs []string
@@ -40,6 +49,7 @@ type Fake struct {
 
 	chats int
 	ups   int
+	turns int
 }
 
 // NewFake 造一个依次回这几句的假 provider。
@@ -81,6 +91,16 @@ func (f *Fake) Chat(_ context.Context, req Request) (Reply, error) {
 		return Reply{}, f.ChatErr
 	}
 	f.Chats = append(f.Chats, req)
+
+	// Turns 优先：它表达得了「这一轮要调工具」这种形状，Replies 只能给一句话。
+	if len(f.Turns) > 0 {
+		i := f.turns
+		if i >= len(f.Turns) {
+			i = len(f.Turns) - 1
+		}
+		f.turns++
+		return f.Turns[i], nil
+	}
 
 	if len(f.Replies) == 0 {
 		return Reply{Text: fmt.Sprintf(`{"tags":[{"subject":"占位学科","chapter":"","point":""}]}`)}, nil

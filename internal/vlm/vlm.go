@@ -20,14 +20,30 @@
 //   - 计费口径：官方说是**单图最多 1024 token**（写票时记的 384 只出现在第三方转述里）。
 //     这不影响实现，只影响对成本的预期。
 //   - 图片只能放在 user 消息里，进 system / assistant 直接 400。
+//
+// 工具调用（官方叫 Tool Calls）的契约同样对着官方文档核过，与写票时的转述有出入，以官方为准：
+//
+//   - 工具写在请求的 tools 数组里，一项形如 {"type":"function","function":{name, description,
+//     parameters}}；parameters 是一个 JSON Schema 对象，名字只许 a-z A-Z 0-9 _ -，最长 128。
+//   - 模型要调工具时，choices[0].finish_reason 是 "tool_calls"，message.tool_calls 里每一项带
+//     id / type / function.name / function.arguments —— **arguments 是一个 JSON 字符串**，
+//     官方明说模型「不总是生成合法 JSON」，所以校验是调用方的事，这一层不替它猜。
+//   - 循环的规矩是：先把那条 assistant 消息（带 tool_calls）原样 append 回去，再为每一次调用
+//     append 一条 role="tool" 的消息，它必须带 tool_call_id。少带 assistant 那条，下一轮的
+//     tool 结果就没有归属。
+//   - tool_choice 有 auto / none / required / 指定函数四种；**required 与指定函数在思考模式下
+//     会被 400 拒掉**（官方文档原话）。所以这里压根不给这个开关：有工具时默认就是 auto。
+//   - 视觉与工具调用不是互斥的：官方能力矩阵里 deepseek-flash 两样都支持，视觉那份指南里
+//     也没写「带图就不能用工具」。本包不为此加任何限制。
 package vlm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 )
 
-// Role 是一条消息的角色。取值直接就是线上报文里的样子（user / assistant / system），
+// Role 是一条消息的角色。取值直接就是线上报文里的样子（user / assistant / system / tool），
 // 不另立一套自己的枚举再到实现里翻译一遍 —— 这一层抽象要挡的差异不在这里。
 type Role string
 
@@ -35,6 +51,9 @@ const (
 	RoleSystem    Role = "system"
 	RoleUser      Role = "user"
 	RoleAssistant Role = "assistant"
+	// RoleTool 是「这是某次工具调用的结果」那条消息。它必须带着 ToolCallID（线上叫
+	// tool_call_id），把结果挂回模型发起的那一次调用上；图片不能挂在这种消息上。
+	RoleTool Role = "tool"
 )
 
 // Image 是要交给模型看的一张图。
@@ -63,6 +82,50 @@ type Message struct {
 	// Images 只能挂在 user 消息上 —— 服务方的硬约束：放进 system 或 assistant 直接 400。
 	// 类型上没拦这一条（拦了就得为每种能带图的角色各造一个类型），由 Service 拼消息时守住。
 	Images []Image
+
+	// ToolCalls 非空表示这条 assistant 消息的内容是「模型要求调用这几个工具」。
+	// 多轮之间要**原样**带回去（见本包的包注释：先 append 它，再 append 每条工具结果）。
+	ToolCalls []ToolCall
+
+	// ToolCallID 只在 RoleTool 的消息上有值：它在回答哪一次调用。
+	ToolCallID string
+
+	// Reasoning 是思考模式下的推理过程（线上叫 reasoning_content）。
+	// 官方那份思考模式的工具调用示例是把整条 assistant 消息整个 append 回去的，
+	// 于是推理过程也跟着走了；我们这边是自己拼报文（不是转发原对象），所以得显式带着它，
+	// 免得下一轮因为少了一块而被服务方退回。
+	Reasoning string
+}
+
+// Tool 是一件交给模型的工具。
+//
+// 声明方只写下「它叫什么、干什么、参数长什么样」，执行永远在调用方这一侧 ——
+// 官方文档特意强调过模型自己不执行任何函数。
+type Tool struct {
+	// Name 是工具名，会原样进报文。服务方只允许 a-z A-Z 0-9 _ -，最长 128。
+	Name string
+	// Description 是给模型看的说明。模型挑不挑得对工具，全靠这一句话。
+	Description string
+	// Parameters 是参数的 JSON Schema（一个 JSON 对象，形如
+	// {"type":"object","properties":{...},"required":[...]}）。
+	//
+	// 它是 RawMessage 而不是一个结构体：schema 由**声明工具的那一方**（agent 那层）写，
+	// 这一层只负责原样放进报文，不去理解它。
+	Parameters json.RawMessage
+}
+
+// ToolCall 是模型要求的一次工具调用。
+type ToolCall struct {
+	// ID 是这次调用的标识（线上是 id）。喂回结果时要原样带上 —— 它就是 tool_call_id。
+	ID string
+	// Name 是模型挑中的工具名。
+	Name string
+	// Arguments 是模型生成的参数，**一个 JSON 字符串**而不是解析好的对象。
+	//
+	// 为什么不在这里替它解成 map：官方文档明说模型「不总是生成合法 JSON」。
+	// 解析失败是一件**要喂回模型让它重试**的事（连同哪一段解不开），不是这一层的故障 ——
+	// 在这里解就等于把一个可纠正的错误升格成一次调用失败。
+	Arguments string
 }
 
 // Request 是一次对话请求。
@@ -80,11 +143,25 @@ type Request struct {
 	// JSON 为真时要求服务方以 JSON 对象作答。打标签这条路径要的就是它：
 	// 回答得能解析成结构化标签，不能是一段散文。
 	JSON bool
+
+	// Tools 是这次可以用的工具。空表示这次不给它工具（模型就只能回答）。
+	//
+	// 刻意**没有** tool_choice 这个开关：官方文档说 required 与「指定某个函数」在思考模式下
+	// 会被 400 拒掉，而有工具时服务方的默认值就是 auto（让模型自己决定调不调）——
+	// 那也正是这里想要的语义，多一个会被拒的旋钮只是多一个坑。
+	Tools []Tool
 }
 
 // Reply 是模型的一次回答。
 type Reply struct {
 	Text string
+
+	// ToolCalls 非空表示模型没有直接回答，而是要调用这几个工具。
+	// 这时 Text 通常是空的，但两者并不互斥 —— 模型可以边说边调。
+	ToolCalls []ToolCall
+
+	// Reasoning 是思考模式下那段推理过程，见 Message.Reasoning。
+	Reasoning string
 }
 
 // Provider 是一家模型服务。

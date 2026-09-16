@@ -6,17 +6,6 @@ export {
     Service
 };
 
-export {
-    Role
-} from "./models.js";
-
 export type {
-    Config,
-    ConfigView,
-    Image,
-    Message,
-    ProposedTag,
-    Reply,
-    TagSuggestion,
-    ToolCall
+    Recommendation
 } from "./models.js";

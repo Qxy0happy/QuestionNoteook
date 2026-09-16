@@ -128,6 +128,7 @@ func (d *DeepSeek) Chat(ctx context.Context, req Request) (Reply, error) {
 		// 打标签那条路径要的就是它：回答得能直接解析成结构化标签。
 		payload.ResponseFormat = &responseFormat{Type: "json_object"}
 	}
+	payload.Tools = wireTools(req.Tools)
 
 	raw, err := json.Marshal(payload)
 	if err != nil {
@@ -159,27 +160,50 @@ func (d *DeepSeek) Chat(ctx context.Context, req Request) (Reply, error) {
 	if len(out.Choices) == 0 {
 		return Reply{}, errors.New("VLM: 调用模型: 回应里没有 choices")
 	}
-	return Reply{Text: out.Choices[0].Message.Content}, nil
+
+	msg := out.Choices[0].Message
+	reply := Reply{Text: msg.Content, Reasoning: msg.ReasoningContent}
+	// 原样搬过来，不在这里解释 arguments（它可能不是合法 JSON，见 ToolCall.Arguments）。
+	for _, c := range msg.ToolCalls {
+		reply.ToolCalls = append(reply.ToolCalls, ToolCall{
+			ID:        c.ID,
+			Name:      c.Function.Name,
+			Arguments: c.Function.Arguments,
+		})
+	}
+	return reply, nil
 }
 
 // messages 把本包的 Request 摊成线上的消息数组。
 //
-// 两条规矩守在这里：
+// 三条规矩守在这里：
 //   - 系统提示词只带文本 —— 图片放进 system 会被服务方以 400 拒掉。
 //   - 没有图的消息用纯字符串 content，有图的用块数组。字符串那一形是各家都吃的，
 //     块数组只在真有图时才需要，没必要全局改用后者。
+//   - 工具调用那两条消息（assistant 带 tool_calls、tool 带 tool_call_id）原样翻译，
+//     见 message。
 func (d *DeepSeek) messages(req Request) []chatMessage {
 	msgs := make([]chatMessage, 0, len(req.Messages)+1)
 	if req.System != "" {
 		msgs = append(msgs, chatMessage{Role: RoleSystem, Content: req.System})
 	}
-
 	for _, m := range req.Messages {
-		if len(m.Images) == 0 {
-			msgs = append(msgs, chatMessage{Role: m.Role, Content: m.Text})
-			continue
-		}
+		msgs = append(msgs, d.message(m))
+	}
+	return msgs
+}
 
+// message 摊一条消息。
+func (d *DeepSeek) message(m Message) chatMessage {
+	out := chatMessage{
+		Role:       m.Role,
+		ToolCallID: m.ToolCallID,
+		// 推理过程与工具调用是配套的：官方那份示例把整条 assistant 消息原样喂回去，
+		// 所以这边也原样带着（空的不发，见 wire 上的 omitempty）。
+		ReasoningContent: m.Reasoning,
+	}
+
+	if len(m.Images) > 0 {
 		blocks := make([]contentBlock, 0, len(m.Images)+1)
 		if m.Text != "" {
 			blocks = append(blocks, contentBlock{Type: "text", Text: m.Text})
@@ -187,9 +211,19 @@ func (d *DeepSeek) messages(req Request) []chatMessage {
 		for _, img := range m.Images {
 			blocks = append(blocks, d.imageBlock(img))
 		}
-		msgs = append(msgs, chatMessage{Role: m.Role, Content: blocks})
+		out.Content = blocks
+	} else if m.Text == "" && len(m.ToolCalls) > 0 {
+		// 模型那一轮只调工具、没说话时，官方示例里 content 是 null。
+		// 发空串多半也能过，但对着示例发 null 少一个「服务方认不认空串」的未知。
+		out.Content = nil
+	} else {
+		out.Content = m.Text
 	}
-	return msgs
+
+	if len(m.ToolCalls) > 0 {
+		out.ToolCalls = wireToolCalls(m.ToolCalls)
+	}
+	return out
 }
 
 // imageBlock 按「这张图传上去过没有」选传法。
@@ -277,13 +311,21 @@ type chatRequest struct {
 	Model          string          `json:"model"`
 	Messages       []chatMessage   `json:"messages"`
 	ResponseFormat *responseFormat `json:"response_format,omitempty"`
+	// 没有 tool_choice：有工具时服务方默认就是 auto，而 required / 指定函数在思考模式下
+	// 会被 400 拒掉（官方文档），所以这个旋钮根本不接出来。
+	Tools []toolSpec `json:"tools,omitempty"`
 }
 
-// chatMessage 的 Content 是 any：纯文本时是字符串，带图时是块数组。
-// 两种形状服务方都认，见 messages。
+// chatMessage 的 Content 是 any：纯文本时是字符串，带图时是块数组，只调工具时是 null。
+// 三种形状服务方都认，见 message。
 type chatMessage struct {
 	Role    Role `json:"role"`
 	Content any  `json:"content"`
+	// ToolCalls 只在 assistant 消息上出现；ToolCallID 只在 tool 消息上出现。
+	ToolCalls  []toolCallWire `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+	// ReasoningContent 只在思考模式下出现，且必须跟着带 tool_calls 的那条消息一起回去。
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 }
 
 type contentBlock struct {
@@ -302,10 +344,65 @@ type responseFormat struct {
 	Type string `json:"type"`
 }
 
+// toolSpec 是 tools 数组里的一项。字段名照官方文档抄。
+type toolSpec struct {
+	Type     string       `json:"type"` // 恒为 function —— 官方说目前只支持函数这一类
+	Function functionSpec `json:"function"`
+}
+
+type functionSpec struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	// 原样转发声明方给的 JSON Schema（见 Tool.Parameters）。
+	Parameters json.RawMessage `json:"parameters,omitempty"`
+}
+
+// toolCallWire 是模型回来的那一次工具调用。arguments 是**字符串**，不是对象。
+type toolCallWire struct {
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
 type chatResponse struct {
 	Choices []struct {
 		Message struct {
 			Content string `json:"content"`
+			// 思考模式下与 tool_calls 配套的那段推理过程，见 Message.Reasoning。
+			ReasoningContent string         `json:"reasoning_content"`
+			ToolCalls        []toolCallWire `json:"tool_calls"`
 		} `json:"message"`
 	} `json:"choices"`
+}
+
+// wireTools 把本包的工具清单摊成线上的 tools 数组；没有工具时返回 nil（omitempty 就不发）。
+func wireTools(tools []Tool) []toolSpec {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]toolSpec, 0, len(tools))
+	for _, t := range tools {
+		out = append(out, toolSpec{
+			Type:     "function",
+			Function: functionSpec{Name: t.Name, Description: t.Description, Parameters: t.Parameters},
+		})
+	}
+	return out
+}
+
+// wireToolCalls 把模型那轮的调用摊回报文。type 恒为 function（官方目前只支持这一类）。
+func wireToolCalls(calls []ToolCall) []toolCallWire {
+	out := make([]toolCallWire, 0, len(calls))
+	for _, c := range calls {
+		var w toolCallWire
+		w.ID = c.ID
+		w.Type = "function"
+		w.Function.Name = c.Name
+		w.Function.Arguments = c.Arguments
+		out = append(out, w)
+	}
+	return out
 }

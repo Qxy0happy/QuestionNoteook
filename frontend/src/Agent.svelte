@@ -1,13 +1,28 @@
 <script lang="ts">
-  // Agent 页：目前只有一件事 —— 配 VLM 的端点与凭据。
+  // Agent 页：配 VLM 的端点与凭据，以及每日汇总通知。
   //
-  // 为什么这一页是必需的：配置落在应用私有目录（/data/data/<包名>/files/questionbook/vlm.json），
-  // 手机上没有任何文件管理器够得着它。没有这个界面，"识别标签"就只能靠 adb push 一个 json 才能用。
+  // 为什么这一页是必需的：两份配置都落在应用私有目录
+  // （/data/data/<包名>/files/questionbook/ 下的 vlm.json 与 digest.json），
+  // 手机上没有任何文件管理器够得着它们。没有这个界面，"识别标签"与"每日提醒"
+  // 就只能靠 adb push 一个 json 才能用。
   //
   // 凭据**只出不进**：读回来的只有「设没设」与长度，值本身不进界面、不进日志。
+  // （每日提醒那份没有凭据，读回来的就是真值，见 Go 侧 digest.SetConfig 的注释。）
 
+  import { onMount } from 'svelte';
+
+  import * as Agent from '../bindings/questionbook/internal/agent/service';
+  import type { Answer } from '../bindings/questionbook/internal/agent/models';
+  import Markdown from './Markdown.svelte';
+  import Pending from './Pending.svelte';
   import * as VLM from '../bindings/questionbook/internal/vlm/service';
   import type { Config, ConfigView } from '../bindings/questionbook/internal/vlm/models';
+  import * as Digest from '../bindings/questionbook/internal/digest/service';
+  import type {
+    Config as DigestConfig,
+    ConfigView as DigestConfigView,
+    Slot,
+  } from '../bindings/questionbook/internal/digest/models';
 
   let root = $state<HTMLElement | null>(null);
   let view = $state<ConfigView | null>(null);
@@ -15,6 +30,18 @@
   let saving = $state(false);
   let error = $state('');
   let saved = $state('');
+
+  // ── 每日汇总通知 ──
+
+  let digestView = $state<DigestConfigView | null>(null);
+  let digestEnabled = $state(true);
+  // 钟点用字符串存：<input type="time"> 的值就是 "HH:MM"，进出都对得上。
+  let digestTime = $state('20:00');
+  // 下一次该发的那一条：什么时候发、那一天到期几道、发什么字。
+  let nextSlot = $state<Slot | null>(null);
+  let digestSaving = $state(false);
+  let digestError = $state('');
+  let digestSaved = $state('');
 
   // 提交的补丁：**空串表示这一项不动**（Go 侧是补丁语义）。
   // 因为凭据读不回来，整份覆盖会把 key 抹掉，所以只能按项提交。
@@ -29,6 +56,35 @@
 
   function errorMessage(err: unknown): string {
     return err instanceof Error ? err.message : String(err);
+  }
+
+  // ── 问 agent（票 11）──
+  //
+  // agent 读得到一切，但**每一次写都变成一条待批准改动** —— 那是 Go 侧用反射锁与源码
+  // 扫描钉死的性质（internal/agent/safety_test.go），不是这里的自觉。所以这里问一句话
+  // 最坏的结果是「多出几条待批准」，正式数据一个字节都不会动。
+  let askText = $state('');
+  let asking = $state(false);
+  let answer = $state<Answer | null>(null);
+  let askError = $state('');
+  // 变了就让待批准清单重读一遍：agent 刚提的新东西得当场出现。
+  let pendingKey = $state(0);
+
+  async function askAgent() {
+    const q = askText.trim();
+    if (!q || asking) return;
+    asking = true;
+    askError = '';
+    try {
+      answer = await Agent.Ask(q);
+      askText = '';
+      // 无论这一轮提没提改动都 +1 —— 重读一次是最省事的「与库对齐」。
+      pendingKey += 1;
+    } catch (err) {
+      askError = errorMessage(err);
+    } finally {
+      asking = false;
+    }
   }
 
   async function load() {
@@ -53,13 +109,16 @@
     }
   }
 
-  // 四页同时挂载，切到这一页才值得读一次配置文件。
+  // 四页同时挂载，切到这一页才值得读一次配置文件（两份一起）。
   $effect(() => {
     const el = root;
     if (!el) return;
     const io = new IntersectionObserver((entries) => {
       for (const entry of entries) {
-        if (entry.isIntersecting) void load();
+        if (entry.isIntersecting) {
+          void load();
+          void loadDigest();
+        }
       }
     });
     io.observe(el);
@@ -83,6 +142,102 @@
       saving = false;
     }
   }
+
+  // ── 每日汇总通知 ──
+
+  function pad2(n: number): string {
+    return String(n).padStart(2, '0');
+  }
+
+  // 把宿主会看到的那一刻说成人话：今天/明天/9月18日 + 几点。
+  //
+  // FireAt 是 Go 那边给出的绝对时刻（带时区偏移的字符串），new Date 解出来的就是同一个
+  // 瞬间，再按设备本地时间读几点几分 —— 与 Go 侧拿设备时区算的那一下是两回事，
+  // 但落到用户眼里必须是同一个钟点（提醒设在晚上八点，看到的就得是 20:00）。
+  function whenText(slot: Slot): string {
+    const at = new Date(slot.FireAt);
+    const now = new Date();
+    const sameDay = (a: Date, b: Date) =>
+      a.getFullYear() === b.getFullYear() &&
+      a.getMonth() === b.getMonth() &&
+      a.getDate() === b.getDate();
+
+    let day: string;
+    if (sameDay(at, now)) {
+      day = '今天';
+    } else if (sameDay(at, new Date(now.getTime() + 24 * 60 * 60 * 1000))) {
+      day = '明天';
+    } else {
+      day = `${at.getMonth() + 1}月${at.getDate()}日`;
+    }
+    return `${day} ${pad2(at.getHours())}:${pad2(at.getMinutes())}`;
+  }
+
+  async function loadDigest() {
+    try {
+      const v = await Digest.Config();
+      digestView = v;
+      digestEnabled = v.Enabled;
+      digestTime = `${pad2(v.Hour)}:${pad2(v.Minute)}`;
+      // 下一次那一条要单独问：它是算出来的，不在设置里。
+      nextSlot = await Digest.Next();
+      digestError = '';
+    } catch (err) {
+      // 设置文件坏了（或者库读不出到期数）时走到这里。照实说，别把上一次的值当现值。
+      digestError = errorMessage(err);
+    }
+  }
+
+  async function saveDigest() {
+    if (digestSaving) return;
+    digestSaving = true;
+    digestSaved = '';
+    try {
+      const [h, m] = digestTime.split(':').map((s) => Number(s));
+      // 键名是小写的那三个：Go 侧 Config 带 json tag（enabled / hour / minute），
+      // 生成的类型用的就是 tag 名，与 vlm 那边的 base_url 同一个规矩 —— 写 Go 的字段名
+      // 编译期就过不去（ConfigView 那类没有 tag 的才用大写字段名）。
+      const cfg: DigestConfig = { enabled: digestEnabled, hour: h, minute: m };
+      // 整份提交，不是补丁（那边没有凭据要护着，见 Go 侧 digest.SetConfig）。
+      await Digest.SetConfig(cfg);
+      await loadDigest();
+      digestSaved = '已保存';
+    } catch (err) {
+      // 坏的时刻会被后端当场退回、不落盘，所以这里照实显示，别假装存上了。
+      digestError = errorMessage(err);
+    } finally {
+      digestSaving = false;
+    }
+  }
+
+  // 重算宿主读的那份排程。
+  //
+  // 为什么要从**这一页**去动它：能挂的地方只有这里（App.svelte 与 Review.svelte 这一轮
+  // 不归这一票改）。四页是同时挂载的，所以下面 mount 那一次等于「应用打开时重算一次」；
+  // 而退到后台那一次盖的是「用户临退出去之前刚评过几道题」—— 那些新算出来的到期时刻
+  // 只有在这一刻才落进排程里，不重算的话第二天那条通知报的数字就少了几道。
+  //
+  // 静默失败是有意的：这是后台的保养动作，不是用户按下的按钮，报错只会是噪音。
+  // 真正需要用户知道的错（设置存不下）会在保存时显示出来。
+  async function refreshSchedule() {
+    try {
+      await Digest.Refresh();
+    } catch {
+      // 忽略：排程旧一点，比弹一个用户没法处理的错误好
+    }
+  }
+
+  onMount(() => {
+    void refreshSchedule();
+
+    // 安卓上「退出应用」多半是退到后台，visibilitychange 是这里唯一抓得到的信号。
+    // 用 pagehide 也行，但它在某些 WebView 里不触发；visibilitychange 稳一些。
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') void refreshSchedule();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => document.removeEventListener('visibilitychange', onVisibility);
+  });
 </script>
 
 <div class="agent" bind:this={root}>
@@ -192,6 +347,108 @@
         </button>
         <button class="pill" onclick={load} disabled={saving || loading}>重新读取</button>
       </div>
+
+      <!-- 两块设置共用一个滚动区：各给一个 .form 会各带一条滚动条，
+           手机上滑起来会分不清自己在滚哪一块。 -->
+      <hr class="sep" />
+
+      <p class="note">
+        每天到点发一条汇总，形如「今天有 5 道待复习」。当天没有到期题就不发，也不会为每道题
+        单独发一条。
+        <br />
+        安卓 13 及以上，第一次发之前系统会问一次通知权限；不给的话这条汇总就出不来。
+        {#if digestView?.SchedulePath}<br /><code>{digestView.SchedulePath}</code>{/if}
+      </p>
+
+      {#if digestView?.Problem}
+        <p class="banner warn">{digestView.Problem}</p>
+      {/if}
+      {#if digestError}
+        <p class="banner">{digestError}</p>
+      {/if}
+      {#if digestSaved}
+        <p class="banner ok">{digestSaved}</p>
+      {/if}
+
+      <label class="row">
+        <input type="checkbox" bind:checked={digestEnabled} />
+        <span>每天发一条汇总</span>
+      </label>
+
+      <label>
+        <span>发送时刻<span class="opt">本地时间</span></span>
+        <!-- type="time" 唤起的是系统的时间选择器：手机上让用户手敲「20:00」两个数字很难受。 -->
+        <input type="time" bind:value={digestTime} disabled={!digestEnabled} />
+      </label>
+
+      {#if nextSlot}
+        <p class="note">
+          {#if nextSlot.Count > 0}
+            下一次：{whenText(nextSlot)} —— {nextSlot.Body}。
+          {:else}
+            下一次：{whenText(nextSlot)} —— 那天没有到期题，不发。
+          {/if}
+        </p>
+      {/if}
+
+      <div class="actions">
+        <button class="pill go" onclick={saveDigest} disabled={digestSaving}>
+          {digestSaving ? '保存中…' : '保存'}
+        </button>
+        <button class="pill" onclick={loadDigest} disabled={digestSaving}>重新读取</button>
+      </div>
+
+      <hr class="sep" />
+
+      <p class="note">
+        还可以直接问它关于全部错题的问题（比如「我数学哪块最弱」）—— 它会自己去查数据。
+        它**改不动**正式数据：想改什么只能提一条待批准改动，等你逐条点头。
+      </p>
+
+      {#if askError}
+        <p class="banner">{askError}</p>
+      {/if}
+
+      <label>
+        <span>问一句</span>
+        <input
+          bind:value={askText}
+          type="text"
+          autocapitalize="none"
+          autocorrect="off"
+          spellcheck="false"
+          placeholder="我数学哪块最弱"
+          onkeydown={(e) => {
+            if (e.key === 'Enter') void askAgent();
+          }}
+        />
+      </label>
+      <div class="actions">
+        <button class="pill go" onclick={askAgent} disabled={asking || !askText.trim()}>
+          {asking ? '它在查…' : '问'}
+        </button>
+      </div>
+
+      {#if answer}
+        <div class="answer">
+          <!-- 模型吐的是同一种东西（markdown + 公式），所以与讨论那边共用一套渲染。 -->
+          {#if answer.Text}
+            <Markdown text={answer.Text} />
+          {/if}
+          {#if answer.Proposals?.length}
+            <p class="note">这一轮提了 {answer.Proposals.length} 条待批准改动，在下面。</p>
+          {/if}
+          {#if answer.Problem}
+            <p class="banner warn">{answer.Problem}</p>
+          {/if}
+        </div>
+      {/if}
+
+      <hr class="sep" />
+
+      <!-- 待批准清单（票 11）：agent 提议的改动都在这儿，逐条批准或丢弃。
+           批准之前不影响正式数据。 -->
+      <Pending refreshKey={pendingKey} />
     </div>
   {/if}
 </div>
@@ -298,6 +555,51 @@
     background-position: right 1rem center, right 0.7rem center;
     background-size: 0.35rem 0.35rem, 0.35rem 0.35rem;
     background-repeat: no-repeat;
+  }
+
+  /* 两块设置之间的分隔线。用 <hr> 而不是再加一个标题，是因为这两块在
+     「agent 设置」里是平级的，一个标题反而会让人以为下面那块是子项。 */
+  .sep {
+    width: 100%;
+    margin: 0.15rem 0;
+    border: 0;
+    border-top: 1px solid rgba(244, 246, 251, 0.1);
+  }
+
+  /* 勾选那一行是横着的：checkbox 加一句话。上面那条 label 的竖排规则不能套在它身上。 */
+  label.row {
+    flex-direction: row;
+    align-items: center;
+    gap: 0.55rem;
+  }
+
+  /* 上面那条 input, select, textarea 的通配规则是给文本框写的（宽度铺满、有边框底色）。
+     checkbox 套上去会变成一个占满整行、带方框底的怪东西 —— 这里把它改回系统原生的小方块。
+     必须写在通配规则**之后**：同为选择器 `input[type='checkbox']` 权重更高，但顺序一致更保险。 */
+  input[type='checkbox'] {
+    /* 不许铺满：就是那个小方块本身。1.15rem 是手指点得到的尺寸。 */
+    width: 1.15rem;
+    height: 1.15rem;
+    flex: none;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    accent-color: #9fd4ff;
+  }
+
+  /* 时间选择器的那个小钟表图标是深色的，深色底上几乎看不见，翻成白的。 */
+  input[type='time']::-webkit-calendar-picker-indicator {
+    filter: invert(1);
+    opacity: 0.55;
+  }
+
+  /* agent 的回答：markdown + 公式，样式交给 Markdown 组件，这里只管这一格的外观。 */
+  .answer {
+    padding: 0.75rem 0.9rem;
+    border: 1px solid rgba(244, 246, 251, 0.12);
+    border-radius: 0.6rem;
+    background: rgba(244, 246, 251, 0.04);
   }
 
   .actions {

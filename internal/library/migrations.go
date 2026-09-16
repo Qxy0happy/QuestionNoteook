@@ -5,6 +5,16 @@ type migration struct {
 	version int
 	name    string
 	stmts   []string
+	// tables 是这条迁移**建的**表（不含索引 —— 索引跟着表一起被删）。
+	//
+	// 它存在只为一件事：让「退回某个版本」可推。测试里要扮演一个票据 05 年代的库，
+	// 就得把「那之后每条迁移建的表」删掉；把这份清单抄在测试里，每加一条迁移都要
+	// 记得去改 N 个文件 —— 这件事已经被漏掉四次了（迁移 3、4、5 各一次，加上一次
+	// 差点漏）。所以清单放在这儿，由 TablesIntroducedAfter 汇总，测试只管调它。
+	//
+	// 它不是「另一份要靠自觉维护的名单」：与 stmts 的一致性由
+	// TestMigrationTablesMatchWhatStmtsCreate 盯着，写错了会红。
+	tables []string
 }
 
 // migrations 是本库的全部模式变更，version 从 1 起严格递增。
@@ -13,11 +23,12 @@ type migration struct {
 // **已经发布出去的那几条永远不要改** —— 老库只会跑比自己版本号大的那些，
 // 改了它们等于让老库和新库模式不一致。要改就追加新的一条。
 //
-// 这张表里还没有的：待批准改动。它跟着自己那张票走，另加一条迁移。
+// 这张表里还没有的：（暂空 —— 待批准改动是最后加进来的那一条，见版本 5）。
 var migrations = []migration{
 	{
 		version: 1,
 		name:    "建 questions 表",
+		tables:  []string{"questions"},
 		stmts: []string{
 			`CREATE TABLE questions (
 				-- AUTOINCREMENT：id 不回收。删掉的错题不该让新题捡到它的 id。
@@ -37,6 +48,7 @@ var migrations = []migration{
 	{
 		version: 2,
 		name:    "建标签树与错题-标签关联，并预置考研四门",
+		tables:  []string{"tags", "question_tags"},
 		stmts: []string{
 			// 标签是自引用树，固定三层：学科 > 章节 > 知识点。
 			// 读写它的代码在 internal/tags —— 表建在这儿是因为这个库只有一套迁移机制。
@@ -88,6 +100,7 @@ var migrations = []migration{
 	{
 		version: 3,
 		name:    "建复习状态与复习记录",
+		tables:  []string{"review_states", "review_logs"},
 		stmts: []string{
 			// 每道错题一份 FSRS 状态。列与官方 go-fsrs 的 Card 一一对应 ——
 			// 这一行**就是**那张卡，中间不加一层自己的翻译（ADR-0002）。
@@ -141,6 +154,7 @@ var migrations = []migration{
 	{
 		version: 4,
 		name:    "建讨论记录",
+		tables:  []string{"discussions"},
 		stmts: []string{
 			// 讨论是「与 VLM 就某道错题展开的对话」（CONTEXT.md），挂在错题上、可回看。
 			// **一行 = 讨论里的一句话**：同一道题的那些行合起来就是它的会话，
@@ -167,9 +181,76 @@ var migrations = []migration{
 			`CREATE INDEX discussions_question_idx ON discussions (question_id, created_at, id)`,
 		},
 	},
+	{
+		version: 5,
+		name:    "建待批准改动表",
+		tables:  []string{"pending_changes"},
+		stmts: []string{
+			// agent 提议的、尚未生效的改动（CONTEXT.md 的「待批准改动」）。**类型 + 载荷 + 状态**
+			// 就是这张表的全部；载荷是一个 JSON 对象，按 action 解释（agent.Payload）。
+			// 读写它的代码在 internal/agent，这条迁移只是借这个库的迁移机制 ——
+			// 与标签、复习、讨论同一个做法。
+			//
+			// 为什么**落库**而不是只放在内存里：这一层是用户的一个收件箱。应用重启之后
+			// 「agent 提议过什么」要是没了，用户就再也看不到那些改动，而他并没有拒绝过它们；
+			// 界面上那个「待批准 N 条」也会自己归零。批准是一个**人的决定**，决定得有对象，
+			// 而对象得活过这一进程。
+			//
+			// 与前面四条一样是裸的 CREATE，**不加 IF NOT EXISTS**。
+			//
+			// 这条迁移一度带过 IF NOT EXISTS，那是为了绕开一个测试维护问题：三个包里的
+			// TestUpgradeFromOlderSchema 要扮演老库，得把「之后每条迁移建的表」删掉，
+			// 而当时那份清单是手抄的、漏了这条新建的表。绕法是错的 —— IF NOT EXISTS 是
+			// 真的弱化：「表在、但列不对」时它会静默放过，而那恰恰是迁移最该拦住的坏库。
+			// 现在表清单由 migration.tables 汇总（见 TablesIntroducedAfter），测试不必手抄，
+			// 于是没有绕的理由了。
+			`CREATE TABLE pending_changes (
+				-- AUTOINCREMENT：id 不回收。它同时也是「这条改动是第几条」的先后依据。
+				id         INTEGER PRIMARY KEY AUTOINCREMENT,
+				-- 要干什么。取值就是 agent.Action 那几个 —— 两边是一份契约的两半，
+				-- 改一处就得改另一处（agent/change.go 的常量上写着这句话）。
+				-- schema 这层也拦一道：别的种类的改动**根本存不进来**，
+				-- 于是「agent 只能提议标签」不只是代码里的自觉。
+				action     TEXT    NOT NULL CHECK (action IN ('create_tag', 'rename_tag', 'delete_tag', 'tag_question')),
+				-- 载荷，一个 JSON 对象。存文本而不是拆成一堆列：不同的 action 要的字段不一样，
+				-- 拆成列就会长出一片「这条改动用不上」的空列，而它本来就是**模型说的那句话**。
+				payload    TEXT    NOT NULL,
+				-- 一句给人看的中文（「把「中值定理」改名为「微分中值定理」」）。在**提议时**就写好：
+				-- 那时 agent 手上还有整棵标签树，算得出波及面；批准的时候只要读一行。
+				summary    TEXT    NOT NULL,
+				-- 模型自己交代的为什么这么改。
+				reason     TEXT    NOT NULL DEFAULT '',
+				status     TEXT    NOT NULL CHECK (status IN ('pending', 'applied', 'discarded')),
+				-- Unix 毫秒（UTC）—— 与 questions.created_at 同一个约定。
+				created_at INTEGER NOT NULL,
+				-- 用户做决定的时刻；0 表示还没决定。
+				decided_at INTEGER NOT NULL DEFAULT 0,
+				-- 批准时写库失败的原因。**状态仍是 pending** —— 那一步确实没发生，
+				-- 不能因为试过一次就把它标成已生效。
+				problem    TEXT    NOT NULL DEFAULT ''
+			)`,
+			// 列表（只要待批准的，早的在前）与计数都只走这一条。
+			`CREATE INDEX pending_changes_status_idx ON pending_changes (status, created_at, id)`,
+		},
+	},
 }
 
 // latestVersion 是已定义的最高模式版本，空列表时为 0。
+// TablesIntroducedAfter 返回版本号大于 version 的那些迁移建的表，按迁移顺序。
+//
+// 给测试用：要扮演一个某一年代的库，就得把「那之后建的表」都删掉再重开。
+// 清单从 migrations 汇总，所以**新增一条迁移之后不必改任何测试** ——
+// 这件事以前靠在每个测试里手抄，被漏掉过四次。
+func TablesIntroducedAfter(version int) []string {
+	var out []string
+	for _, m := range migrations {
+		if m.version > version {
+			out = append(out, m.tables...)
+		}
+	}
+	return out
+}
+
 func latestVersion() int {
 	if len(migrations) == 0 {
 		return 0

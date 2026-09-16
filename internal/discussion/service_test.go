@@ -510,13 +510,15 @@ func TestUpgradeFromOlderSchema(t *testing.T) {
 
 	// 把库退回票据 09 的形状：讨论那两张表还没建、版本号停在 3。
 	// 这是测试在**扮演**一个老库文件，不是绕过服务层的实现细节。
-	for _, stmt := range []string{
-		`DROP TABLE discussions`,
-		`PRAGMA user_version = 3`,
-	} {
-		if _, err := old.DB().Exec(stmt); err != nil {
-			t.Fatalf("退回老模式 (%s): %v", stmt, err)
+	// 要删的表从迁移表推出来，不手抄（见 tags 那边同一条规矩的说明）。
+	// 这条原先只删了 discussions 自己 —— 于是迁移 5 的表留在库里，重开时撞车。
+	for _, tbl := range library.TablesIntroducedAfter(3) {
+		if _, err := old.DB().Exec(`DROP TABLE ` + tbl); err != nil {
+			t.Fatalf("退回老模式 (DROP TABLE %s): %v", tbl, err)
 		}
+	}
+	if _, err := old.DB().Exec(`PRAGMA user_version = 3`); err != nil {
+		t.Fatalf("退回老模式 (PRAGMA user_version = 3): %v", err)
 	}
 	if err := old.Close(); err != nil {
 		t.Fatalf("Close: %v", err)

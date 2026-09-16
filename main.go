@@ -14,12 +14,17 @@ import (
 
 	"github.com/wailsapp/wails/v3/pkg/application"
 
+	"questionbook/internal/agent"
+	agentapply "questionbook/internal/agent/apply"
+	agentstore "questionbook/internal/agent/store"
 	"questionbook/internal/capture"
+	"questionbook/internal/digest"
 	"questionbook/internal/discussion"
 	"questionbook/internal/library"
 	"questionbook/internal/review"
 	"questionbook/internal/tags"
 	"questionbook/internal/vlm"
+	"questionbook/internal/workload"
 )
 
 // 前端构建产物（vite 产出到 frontend/dist）嵌进二进制，由资源服务器进程内提供。
@@ -64,6 +69,27 @@ func main() {
 	// 必须在 vlmService 之后构造。
 	discussionService := discussion.NewService(db, vlmService)
 
+	// 复习量（票 14）：它只读队列与复习记录、问一次模型，然后给一个数。里面**一条写语句
+	// 都没有**，所以「不采纳就回落到纯 FSRS」不是一句承诺，而是「什么都没发生」。
+	workloadService := workload.NewService(reviewService, db, vlmService)
+
+	// 每日汇总（票 12）：Go 侧只负责算出未来若干天各自的到期数与该发什么。真正到点发那条
+	// 通知的是 Java 宿主 —— 它会读 digest-schedule.json，并且**自己再核一遍**才发。
+	digestService := digest.NewService(db, filepath.Join(root, "digest.json"))
+
+	// agent（票 11）：读的那一侧拿的是只有 Query/QueryRow 的 Querier（不是 *sql.DB），
+	// 提议那一侧只能往待批准表里写。执行者 apply.New **全应用只在这里构造一次** ——
+	// 「只有一条写路径」在实例层面的保证就落在这一行上；类型层面的保证由
+	// internal/agent 的反射锁与源码扫描钉着（见那边的 safety_test.go）。
+	readStore := agentstore.NewReadStore(db.DB(), db, tagsService)
+	pend := agent.NewPending(agentstore.NewPendingStore(db.DB()), agentapply.New(tagsService))
+	// 配置文件与 VLM 用的是**同一份**：agent 也要模型，而模型名只能从配置来（ADR-0005）。
+	agentService := agent.NewService(readStore, pend, filepath.Join(root, "vlm.json"))
+
+	// 注意 internal/export 没在这里注册：它的打包逻辑做完了，但「往哪儿写」要落盘那段
+	// Java 宿主补丁（票 13 第 2 步）。现在唯一能写的地方是应用私有目录 —— 而那里卸载就没了，
+	// 接上去等于交付一个恰好解决不了那张票核心问题的按钮。补丁落地时一并注册。
+
 	app := application.New(application.Options{
 		Name:        "错题本",
 		Description: "考研错题拍照整理与 FSRS 复习",
@@ -74,6 +100,11 @@ func main() {
 			application.NewService(reviewService),
 			application.NewService(vlmService),
 			application.NewService(discussionService),
+			application.NewService(workloadService),
+			application.NewService(digestService),
+			application.NewService(agentService),
+			// 同一个对象既当 agentService 的提议出口，也自己绑给前端（待批准清单那一面）。
+			application.NewService(pend),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
