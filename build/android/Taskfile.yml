@@ -13,18 +13,32 @@ vars:
   # System-image ABI for the host, used in the "create an AVD" hint below.
   ANDROID_ABI:
     sh: '[ "$(uname -m)" = "arm64" ] && echo "arm64-v8a" || echo "x86_64"'
+  # Windows 上 SDK 里的可执行文件带扩展名，其它平台不带。
+  EXE_SUFFIX:
+    sh: 'case "$(uname -s)" in Windows_NT|MINGW*|MSYS*|CYGWIN*) echo ".exe" ;; *) echo "" ;; esac'
+  # cmdline-tools 下的工具在 Windows 上是 .bat 包装脚本，不是 .exe
+  # （实测 `cmdline-tools/latest/bin/` 里全是 .bat：avdmanager、sdkmanager、lint…）。
+  BAT_SUFFIX:
+    sh: 'case "$(uname -s)" in Windows_NT|MINGW*|MSYS*|CYGWIN*) echo ".bat" ;; *) echo "" ;; esac'
   # SDK location: $ANDROID_HOME / $ANDROID_SDK_ROOT, else the per-OS default
-  # (macOS: ~/Library/Android/sdk, Linux/other: ~/Android/Sdk)
+  # (macOS: ~/Library/Android/sdk, Linux/other: ~/Android/Sdk).
+  # Windows 上 $ANDROID_HOME 是反斜杠路径（D:\Cache\Android\sdk），在这个内置 shell
+  # 里当路径用不了，所以统一转成正斜杠 —— 下面三个可执行文件路径都从这里派生，
+  # 不转的话会拼出 `D:\...\sdk/platform-tools/adb.exe` 这种混合分隔符的坏路径。
   SDK_ROOT:
-    sh: 'echo "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$([ -d "$HOME/Library/Android/sdk" ] && echo "$HOME/Library/Android/sdk" || echo "$HOME/Android/Sdk")}}"'
+    sh: |-
+      echo "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$([ -d "$HOME/Library/Android/sdk" ] && echo "$HOME/Library/Android/sdk" || echo "$HOME/Android/Sdk")}}" | tr '\\' '/'
   ADB:
-    sh: 'command -v adb || echo "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$([ -d "$HOME/Library/Android/sdk" ] && echo "$HOME/Library/Android/sdk" || echo "$HOME/Android/Sdk")}}/platform-tools/adb"'
+    sh: 'command -v adb || echo "{{.SDK_ROOT}}/platform-tools/adb{{.EXE_SUFFIX}}"'
   EMULATOR:
-    sh: 'command -v emulator || echo "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$([ -d "$HOME/Library/Android/sdk" ] && echo "$HOME/Library/Android/sdk" || echo "$HOME/Android/Sdk")}}/emulator/emulator"'
+    sh: 'command -v emulator || echo "{{.SDK_ROOT}}/emulator/emulator{{.EXE_SUFFIX}}"'
   # avdmanager lives under cmdline-tools/<version>/bin; used to auto-create an
   # AVD when none exists (mirrors the iOS `ensure-simulator` auto-create flow).
+  # 不用 `sort -V` —— 这个内置 shell 里 sort 会落到 C:\WINDOWS\system32\sort.exe，
+  # 它不认 -V 且**静默吐空**（就是当初谎报 "NDK not found" 的那个坑）。
+  # 目录名 `latest` 只有一个，tail -1 足够。
   AVDMANAGER:
-    sh: 'command -v avdmanager || ls "${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$([ -d "$HOME/Library/Android/sdk" ] && echo "$HOME/Library/Android/sdk" || echo "$HOME/Android/Sdk")}}"/cmdline-tools/*/bin/avdmanager 2>/dev/null | sort -V | tail -1 || true'
+    sh: 'command -v avdmanager || ls "{{.SDK_ROOT}}"/cmdline-tools/*/bin/avdmanager{{.BAT_SUFFIX}} 2>/dev/null | tail -1 || true'
 
   # Windows 上 `./gradlew`（无扩展名的 shell 脚本）跑不起来，要用 gradlew.bat；
   # 而且 go-task 内置 shell 的 PATH 里没有 chmod。宿主判据同 compile:go:shared。
@@ -71,9 +85,7 @@ tasks:
         NDK_ROOT="$ANDROID_NDK_HOME"
         if [ -z "$NDK_ROOT" ]; then
           SDK_ROOT="{{.SDK_ROOT}}"
-          # Windows 上 $ANDROID_HOME 是反斜杠路径。这个 shell 里 ls 是 scoop 的 ls，
-          # 两种分隔符都吃得下，但转成正斜杠更稳。
-          SDK_ROOT=$(printf '%s' "$SDK_ROOT" | tr '\\' '/')
+          # SDK_ROOT 这个变量本身已经把反斜杠转成正斜杠（见文件顶部的 vars），这里不再转。
           # 不要用 `sort -V`：这个 shell 里 sort 解析到 C:\WINDOWS\system32\sort.exe，
           # 它不认 -V，会**静默输出空**，把 NDK_ROOT 变成空串后误报 "NDK not found"。
           # NDK 目录名是 NN.M.PPPPPPPP，ls 的字典序与版本序一致，直接取最后一个即可。
@@ -398,7 +410,16 @@ tasks:
           DEVICE="${DEVICE_ID:-}"
         fi
         if [ -z "$DEVICE" ]; then
-          DEVICE=$("{{.ADB}}" devices | awk 'NR > 1 && $2 == "device" && $1 !~ /^emulator-/ { print $1; exit }')
+          # 该内置 shell 的 PATH 是 Windows 的，没有 awk（scoop shims 里也没有）。
+          # 用 tail/tr + read 取第一个 state=device 且不是模拟器的序列号。
+          DEVICE=$("{{.ADB}}" devices | tr -d '\r' | tail -n +2 | {
+            while read -r SERIAL STATE _REST; do
+              [ "$STATE" = "device" ] || continue
+              case "$SERIAL" in emulator-*) continue ;; esac
+              echo "$SERIAL"
+              break
+            done
+          })
         fi
         if [ -z "$DEVICE" ]; then
           echo "Error: no connected physical Android device found."
@@ -428,7 +449,16 @@ tasks:
           DEVICE="${DEVICE_ID:-}"
         fi
         if [ -z "$DEVICE" ]; then
-          DEVICE=$("{{.ADB}}" devices | awk 'NR > 1 && $2 == "device" && $1 !~ /^emulator-/ { print $1; exit }')
+          # 该内置 shell 的 PATH 是 Windows 的，没有 awk（scoop shims 里也没有）。
+          # 用 tail/tr + read 取第一个 state=device 且不是模拟器的序列号。
+          DEVICE=$("{{.ADB}}" devices | tr -d '\r' | tail -n +2 | {
+            while read -r SERIAL STATE _REST; do
+              [ "$STATE" = "device" ] || continue
+              case "$SERIAL" in emulator-*) continue ;; esac
+              echo "$SERIAL"
+              break
+            done
+          })
         fi
         if [ -z "$DEVICE" ]; then
           echo "Error: no connected physical Android device found."
