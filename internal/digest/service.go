@@ -63,17 +63,24 @@ func NewService(questions *library.Store, configPath string, opts ...Option) *Se
 // 那个文件怎么了。文件**不在**不算问题 —— 那是「还没配过」，显示默认值（开着、20:00）。
 func (s *Service) Config() ConfigView {
 	cfg, err := LoadConfig(s.configPath)
+
+	var v ConfigView
 	switch {
 	case err == nil:
-		return cfg.view(s.configPath, s.schedulePath)
+		v = cfg.view(s.configPath, s.schedulePath)
 	case errors.Is(err, ErrNotConfigured):
-		return DefaultConfig().view(s.configPath, s.schedulePath)
+		v = DefaultConfig().view(s.configPath, s.schedulePath)
 	default:
 		// 文件在但坏了：把默认值摆出来（用户改一下就能存回去），同时说清坏在哪。
-		v := DefaultConfig().view(s.configPath, s.schedulePath)
+		v = DefaultConfig().view(s.configPath, s.schedulePath)
 		v.Problem = err.Error()
-		return v
 	}
+
+	// 宿主那一侧的状态（通知权限、精确闹钟权限、上次发的实况）只有它知道，所以每次读一次。
+	// 读不到不是错 —— 见 host.go 的说明。
+	v.Host = readHostStatusBeside(s.configPath)
+	v.HostNote = v.Host.Note(v.Enabled)
+	return v
 }
 
 // SetConfig 把设置写下去，并立刻重算排程。

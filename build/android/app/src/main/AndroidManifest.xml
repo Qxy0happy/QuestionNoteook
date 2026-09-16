@@ -14,6 +14,13 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- 每日汇总提醒：闹钟不跨重启，开机/覆盖安装后要能重排（DigestBootReceiver）。
+         非导出的 receiver 仍然收得到系统广播，所以这个权限与 exported="false" 不冲突。 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- 每日汇总提醒：到点要发得准。Android 14 起这条对新装应用**默认被拒**，
+         宿主会先问 canScheduleExactAlarms()，拿不到就降级 setWindow，
+         并引导用户去系统设置里开一次（DigestScheduler.maybePromptForExactAlarm）。 -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
     <queries>
         <intent>
@@ -58,6 +65,23 @@
             android:name=".WailsForegroundService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+
+        <!-- 每日汇总：闹钟到点被系统拉起来的那一段。不导出 —— 只有我们自己排的
+             PendingIntent 会触发它，其它应用没有理由给它发广播。 -->
+        <receiver
+            android:name=".DigestAlarmReceiver"
+            android:exported="false" />
+
+        <!-- 每日汇总：开机 / 覆盖安装后重排。闹钟不跨重启也永远不会被备份，
+             这个 receiver 与 MainActivity 的启动 arm 是自愈的两个入口。 -->
+        <receiver
+            android:name=".DigestBootReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
     </application>
 
 </manifest>

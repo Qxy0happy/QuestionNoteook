@@ -46,6 +46,9 @@ type env struct {
 	store  *library.Store
 	images *capture.Store
 	svc    *export.Service
+	// stageDir 是 WithTempDir 指的那个目录 —— 快照与暂存的包都落在这儿，
+	// 所以「失败之后没留下垃圾」那类断言要看它。
+	stageDir string
 }
 
 func newEnv(t *testing.T) *env {
@@ -65,8 +68,9 @@ func newEnv(t *testing.T) *env {
 	}
 
 	// 快照的落点也钉在临时目录里，免得往系统临时目录里拉屎。
-	svc := export.NewService(store, bundleImages{store: images}, export.WithTempDir(t.TempDir()))
-	return &env{t: t, dbPath: dbPath, store: store, images: images, svc: svc}
+	stageDir := t.TempDir()
+	svc := export.NewService(store, bundleImages{store: images}, export.WithTempDir(stageDir))
+	return &env{t: t, dbPath: dbPath, store: store, images: images, svc: svc, stageDir: stageDir}
 }
 
 // saveImage 造一张纯色图落进图片目录，返回它的内容 hash。

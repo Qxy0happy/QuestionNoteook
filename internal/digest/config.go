@@ -70,6 +70,14 @@ type ConfigView struct {
 	// Problem 非空时说明设置文件有问题（读不了、写坏了），此时上面几项是**默认值** ——
 	// 界面不是白的，用户还能把它改回去。
 	Problem string
+
+	// Host 是宿主（Java 那一侧）回写的状态，HostNote 是它翻成的一句人话（可能为空）。
+	//
+	// 为什么分成两样：界面要的只是 Note，而 Host 留着以后做更细的诊断（比如「上次真发的
+	// 是哪一刻」）。两者都是**诊断**，读不到时 Host.Known 为 false、Note 为空 ——
+	// 那种情况下界面什么都不该说，因为「宿主没报过」不是用户的错。
+	Host     HostStatus
+	HostNote string
 }
 
 // view 把设置转成给界面看的那一份。

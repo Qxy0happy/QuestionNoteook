@@ -56,6 +56,16 @@ export interface ConfigView {
      * 界面不是白的，用户还能把它改回去。
      */
     "Problem": string;
+
+    /**
+     * Host 是宿主（Java 那一侧）回写的状态，HostNote 是它翻成的一句人话（可能为空）。
+     * 
+     * 为什么分成两样：界面要的只是 Note，而 Host 留着以后做更细的诊断（比如「上次真发的
+     * 是哪一刻」）。两者都是**诊断**，读不到时 Host.Known 为 false、Note 为空 ——
+     * 那种情况下界面什么都不该说，因为「宿主没报过」不是用户的错。
+     */
+    "Host": HostStatus;
+    "HostNote": string;
 }
 
 /**
@@ -75,6 +85,43 @@ export interface DayCount {
      * 点进去只有 3 道，是这条口径在撑着的两处必须对齐的理由。
      */
     "Count": number;
+}
+
+/**
+ * HostStatus 是**宿主**（Java 那一侧）回写的状态。
+ * 
+ * 为什么要有它：有两件事 Go 侧无从知道 —— 系统里的通知权限有没有被关、精确闹钟的
+ * 「闹钟和提醒」权限有没有给。那两件事只有 Java 知道（`areNotificationsEnabled()`、
+ * `canScheduleExactAlarms()`），所以由它每次 arm / 发完之后写进一个文件，这里只读。
+ * 
+ * **读不到、读坏了都不算错。** 这份东西是诊断，缺了它设置页少显示一行而已；
+ * 让它报错会把「提醒设置」整页顶成红色，而用户其实什么都没做错。
+ */
+export interface HostStatus {
+    /**
+     * Known 为 false 表示宿主还没写过这个文件（补丁还没打上，或者装上之后
+     * 宿主那一侧一次都没跑过）。此时下面几项没有意义，界面也不该拿它们说事。
+     */
+    "Known": boolean;
+
+    /**
+     * CanScheduleExact 是「闹钟和提醒」权限。false 不等于发不出来 —— 宿主会降级到
+     * 不精确的窗口闹钟，只是可能被系统省电策略推到维护窗口。
+     */
+    "CanScheduleExact": boolean;
+
+    /**
+     * NotificationsEnabled 是系统里的通知权限。false 就是**真的发不出来**。
+     */
+    "NotificationsEnabled": boolean;
+    "LastArmAtMS": number;
+    "LastFireAtMS": number;
+
+    /**
+     * LastResult 取值由宿主那边定：posted / skipped_disabled / skipped_no_due /
+     * skipped_stale / skipped_no_permission / failed。空串 = 还没发过。
+     */
+    "LastResult": string;
 }
 
 /**

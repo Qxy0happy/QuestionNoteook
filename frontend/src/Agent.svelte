@@ -13,6 +13,9 @@
 
   import * as Agent from '../bindings/questionbook/internal/agent/service';
   import type { Answer } from '../bindings/questionbook/internal/agent/models';
+  // 导出那一面是一个**主包**里的薄适配（bundleStager），所以它的绑定落在模块根下、
+  // 文件名小写 —— 与 internal/<包>/service.ts 那套不是一个路子。
+  import * as Export from '../bindings/questionbook/bundlestager';
   import Markdown from './Markdown.svelte';
   import Pending from './Pending.svelte';
   import * as VLM from '../bindings/questionbook/internal/vlm/service';
@@ -56,6 +59,65 @@
 
   function errorMessage(err: unknown): string {
     return err instanceof Error ? err.message : String(err);
+  }
+
+  // ── 导出整库（票 13）──
+  //
+  // 分两次调用，因为**中间那一跳只能由宿主做**：Go 把包打好在应用私有目录里
+  // （Stage 返回落点），再把路径交给宿主的 copyToDownloads —— Go 与 WebView 都碰不到
+  // Android 的存储 API（scoped storage 下直接写 /sdcard/Download 会被拒）。
+  let exporting = $state(false);
+  let exportError = $state('');
+  let exportDone = $state('');
+
+  // 宿主的 JS 桥（WailsJSBridge.java，注册名就是 "wails"）。它只在这个 WebView 里存在 ——
+  // 桌面上跑（比如 `wails3 dev`）时没有它，所以这里要判一下，别直接炸。
+  type HostBridge = { copyToDownloads?: (json: string) => string };
+
+  function hostCopyToDownloads(
+    path: string,
+    name: string,
+  ): { ok: boolean; display?: string; error?: string } {
+    const host = (globalThis as { wails?: HostBridge }).wails;
+    if (typeof host?.copyToDownloads !== 'function') {
+      return { ok: false, error: '这个平台没有宿主桥（导出到「下载」只在安卓上有）' };
+    }
+    try {
+      const raw = host.copyToDownloads(
+        JSON.stringify({ path, name, mime: 'application/zip' }),
+      );
+      return JSON.parse(raw) as { ok: boolean; display?: string; error?: string };
+    } catch (err) {
+      return { ok: false, error: errorMessage(err) };
+    }
+  }
+
+  function sizeText(bytes: number): string {
+    if (bytes < 1024) return `${bytes} 字节`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  async function exportLibrary() {
+    if (exporting) return;
+    exporting = true;
+    exportError = '';
+    exportDone = '';
+    try {
+      const b = await Export.Stage();
+      const host = hostCopyToDownloads(b.Path, b.Name);
+      if (!host.ok) {
+        // 包**已经打好了**，所以把这件事说清楚 —— 用户能重试，也能自己去私有目录拿
+        // （路径就在下面那行）。别让他以为白导了一次。
+        exportError = `包已经打好了（${b.Name}），但没能放进「下载」目录：${host.error}`;
+        return;
+      }
+      exportDone = `已导出 ${b.Questions} 道题、${b.Images} 张图（${sizeText(b.Bytes)}），在${host.display}。`;
+    } catch (err) {
+      exportError = errorMessage(err);
+    } finally {
+      exporting = false;
+    }
   }
 
   // ── 问 agent（票 11）──
@@ -363,6 +425,12 @@
       {#if digestView?.Problem}
         <p class="banner warn">{digestView.Problem}</p>
       {/if}
+      <!-- 宿主报回来的状态（通知权限被关、精确闹钟没给、上次没发成…）。
+           文案在 Go 侧拼好（HostNote）—— 它要同时看设置与宿主报的那几个布尔量，
+           是一段判断而不是一段文案，不该散到前端来。空串就是"没什么好说的"。 -->
+      {#if digestView?.HostNote}
+        <p class="banner warn">{digestView.HostNote}</p>
+      {/if}
       {#if digestError}
         <p class="banner">{digestError}</p>
       {/if}
@@ -396,6 +464,28 @@
           {digestSaving ? '保存中…' : '保存'}
         </button>
         <button class="pill" onclick={loadDigest} disabled={digestSaving}>重新读取</button>
+      </div>
+
+      <hr class="sep" />
+
+      <p class="note">
+        把整个错题本打成一个 zip 放进系统的「下载」目录：里面是库与全部题图答案图。
+        应用一卸载私有目录就全没了，**这个包是防丢的唯一手段**。
+        <br />
+        题图是原始像素，包可能不小；导完会在下面告诉你它落在哪。
+      </p>
+
+      {#if exportError}
+        <p class="banner">{exportError}</p>
+      {/if}
+      {#if exportDone}
+        <p class="banner ok">{exportDone}</p>
+      {/if}
+
+      <div class="actions">
+        <button class="pill go" onclick={exportLibrary} disabled={exporting}>
+          {exporting ? '打包中…' : '导出整库'}
+        </button>
       </div>
 
       <hr class="sep" />

@@ -11,7 +11,7 @@
 //
 // 打包本身是纯的：往哪儿写由调用方给一个 io.Writer（WriteBundle），本包不碰安卓存储。
 // 落到系统「下载」目录要走 MediaStore，那段在 Java 宿主里，与打包分开做
-// （票据 13 的第 2 步）。
+// （票据 13 的第 2 步）：本包负责把包**打好在私有目录里**（Stage），宿主负责搬出去。
 package export
 
 import (
@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"time"
 
 	"questionbook/internal/library"
 )
@@ -66,8 +67,10 @@ type Service struct {
 	questions *library.Store
 	images    ImageFiles
 	// 中间那份库快照落哪儿。默认 os.TempDir()，安卓上得由 main.go 换成应用私有目录
-	// —— 见 WithTempDir。
+	// —— 见 WithTempDir。暂存的导出包也落在这儿（见 Stage）。
 	tempDir string
+	// now 取当前时刻。做成字段只为一件事：Stage 用日期当文件名，测试要能把它钉死。
+	now func() time.Time
 }
 
 // Option 给服务补一样可选能力。
@@ -83,7 +86,7 @@ func WithTempDir(dir string) Option {
 
 // NewService 用一个已经开好的错题库、一个图片文件层构造导出服务。
 func NewService(questions *library.Store, images ImageFiles, opts ...Option) *Service {
-	s := &Service{questions: questions, images: images, tempDir: os.TempDir()}
+	s := &Service{questions: questions, images: images, tempDir: os.TempDir(), now: time.Now}
 	for _, opt := range opts {
 		opt(s)
 	}

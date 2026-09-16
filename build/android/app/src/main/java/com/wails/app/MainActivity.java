@@ -100,6 +100,12 @@ public class MainActivity extends AppCompatActivity {
 
         // Load the application
         loadApplication();
+
+        // 每次启动重排每日汇总。**这条是必需的不是优化**：闹钟活在系统内存里，
+        // 重启、强停、清后台之后全没了，而且它永远不会被备份（allowBackup 救不了它），
+        // 所以「打开应用就重排一次」是这套方案唯一能自愈的依据。
+        // arm 是幂等的（同一个 PendingIntent 请求码会覆盖上一次），所以多调无妨。
+        DigestScheduler.arm(this);
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -830,6 +836,10 @@ public class MainActivity extends AppCompatActivity {
         if (bridge != null) {
             bridge.onResume();
         }
+        // 复查一次精确闹钟权限。用户很可能是在系统设置里点完「闹钟和提醒」才回到这里，
+        // 那一刻排程还是降级的窗口闹钟 —— 只有重排一次才能换成精确的。
+        // 官方对这个权限的指引就是在 onResume() 里复查（见票据 12 的 Comments）。
+        DigestScheduler.arm(this);
     }
 
     @Override

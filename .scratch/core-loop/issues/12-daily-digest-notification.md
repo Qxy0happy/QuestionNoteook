@@ -4,9 +4,9 @@
 
 **Blocked by:** 08（复习）
 
-**Status:** Go 侧完成（16 条测试全过）；**宿主补丁未做** —— 不写 Java 那一段，通知一条也不会发
+**Status:** ready-for-human —— Go 侧 16 条测试全过、宿主补丁已编译进 APK 并部署；**真机一条都没验过**
 
-- [ ] 每天固定时间发一条，且只发一条 ← 调度在宿主，未做
+- [x] 每天固定时间发一条，且只发一条（宿主一条闹钟 + receiver 末尾重排下一条）
 - [x] 内容包含当天到期的数量（`Slot.Body` 已经算好）
 - [x] 当天没有到期题时**不发**（`Slot.Count == 0` 就是「不发」）
 - [x] 不发单题通知（只有汇总一条）
@@ -103,6 +103,55 @@ Wails 里也没有能取消的方法）。唯一一条路是把话写进**宿主
 安卓 14+ 上还要重新去系统设置里点一次「闹钟和提醒」。
 **闹钟永远不会被备份**，所以「每次启动重排」是这套方案能自愈的唯一依据。
 （manifest 现在是 `allowBackup="true"`，但那救不了闹钟。）
+
+### 宿主回写的状态（用户要的那一行）
+
+有两件事 Go 侧**无从知道** —— 系统里的通知权限有没有被关、精确闹钟的「闹钟和提醒」有没有给。
+那只有 Java 知道（`areNotificationsEnabled()` / `canScheduleExactAlarms()`）。所以宿主每次
+arm / 发完之后把状态**回写**到 `<dataDir>/digest-host.json`，Go 只读（`internal/digest/host.go`）。
+
+**读不到、读坏了都当「不知道」，不报错** —— 它是诊断，不是用户做错了什么。把它当错误处理会把
+「提醒设置」整页顶成红色。
+
+**文件名与字段名是两个进程之间的契约**（中间没有类型能帮它们对齐），所以有一条**契约测试**
+照着宿主写下的形状造一份、断言 Go 读得懂。改名要两边同时改，这条测试会当场翻。
+
+那句人话（`HostStatus.Note`）在 Go 侧拼：它要同时看 `enabled` 与宿主报的两三个布尔量，
+是一段**判断**而不是一段文案。措辞上有一条刻意的区分 —— **通知权限被关 = 真的发不出来**，
+而**精确闹钟没给 = 发得出来但可能晚**（宿主降级到不精确的窗口闹钟）。两者混成一句就是在骗用户。
+
+### 宿主补丁落地成了什么样
+
+三个新文件（`DigestScheduler` / `DigestAlarmReceiver` / `DigestBootReceiver`）+ 三处改动
+（`WailsJSBridge` 加 `copyToDownloads` 是票 13 的；`WailsBridge.postNotification` 只修权限顺序；
+`MainActivity` 启动与 `onResume` 各 arm 一次；manifest 两条权限两个 receiver）。
+
+**一个值得记下来的坑（不写下来会被重新踩）**：**绝不 arm 一个已经过去的时刻**。
+`AlarmManager` 对过去的时刻会**立刻**触发，receiver 复核时看到「日期就是今天、距 fire_at 才几秒」
+（在宽限内）→ 发；然后 receiver 末尾再 arm，又挑中同一条 → 立刻再触发 → **死循环刷通知**。
+所以 `fire_at > now` 是硬条件，它不是洁癖。
+
+**降级路径**：拿不到精确权限时走 `setWindow(..., 10min)`。取 10 分钟是权衡 ——
+窗口再宽就等于把用户设的「几点发」也弄丢了。真正的代价是 Doze 里 `setWindow` 会被推到维护窗口
+（可能晚几十分钟），这一条由 receiver 的 6 小时宽限兜着：超了就 `skipped_stale` 不发，
+**那天的数字不会错**。另外 `setExactAndAllowWhileIdle` 外面单独 catch `SecurityException` 并降级 ——
+权限可能在 `canScheduleExactAlarms()` 之后、那一句之前被用户撤掉，不该把整次排程丢掉。
+
+**引导只在三个条件同时成立时弹**：只引导一次（SharedPreferences 标志，**不写进 `digest-host.json`**
+——那是 Go 定的形状）、真的排上了一条之后（没有可发的东西时把人丢进系统设置是骚扰）、
+且 `ctx instanceof Activity`（`arm` 也会被 receiver 调到，那种上下文里 `startActivity` 会被
+后台启动限制挡掉，白烧掉那次机会）。
+
+`MainActivity` 的 `onResume` 里也 arm 一次，**这不是我列的清单，是补丁自己加的**：用户刚去系统设置
+点完「闹钟和提醒」回来时，排程还是降级的窗口闹钟，只有重排才能换成精确的 —— 官方指引也是这么说的。
+加了 `contentIntent`（点通知回到应用），同样超出清单，理由是不加的话点它什么都不发生。
+
+### 两条留给 Go 侧（已接）
+
+- **`last_result` 为空串是常态**：宿主的约定是「arm 成功不动 `last_result`」，所以文件刚被 arm
+  建出来、还没到过点时它就是空的。Go 侧把它当「还没到过点」而不是异常（`HostStatus.Note` 里
+  有一条测试专门写着这句话）。
+- **`last_fire_at_ms` 只在真的发出去时更新**（跳过不写），否则设置页会把一次跳过说成一次发送。
 
 ### 未验证
 

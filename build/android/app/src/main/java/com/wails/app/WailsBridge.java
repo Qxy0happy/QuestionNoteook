@@ -726,6 +726,13 @@ public class WailsBridge {
                         "android.permission.POST_NOTIFICATIONS") != PackageManager.PERMISSION_GRANTED) {
                     activity.requestPermissions(
                             new String[]{"android.permission.POST_NOTIFICATIONS"}, 1001);
+                    // 只要权限、**不抢着发**：权限对话框还挂在屏幕上时发出去的这条通知
+                    // 会被系统丢掉 —— 也就是说「要完权限立刻照发」等于保证第一次那条
+                    // 一定丢。这里直接返回，等调用方下一次再发（每日汇总是到点重来，
+                    // 丢了这一条不影响明天那条）。
+                    emitEvent("common:notification",
+                            "{\"ok\":false,\"error\":\"notification permission requested\"}");
+                    return;
                 }
                 Notification n = new NotificationCompat.Builder(activity, channelId)
                         .setSmallIcon(android.R.drawable.ic_dialog_info)

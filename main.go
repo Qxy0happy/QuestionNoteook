@@ -20,6 +20,7 @@ import (
 	"questionbook/internal/capture"
 	"questionbook/internal/digest"
 	"questionbook/internal/discussion"
+	"questionbook/internal/export"
 	"questionbook/internal/library"
 	"questionbook/internal/review"
 	"questionbook/internal/tags"
@@ -86,9 +87,7 @@ func main() {
 	// 配置文件与 VLM 用的是**同一份**：agent 也要模型，而模型名只能从配置来（ADR-0005）。
 	agentService := agent.NewService(readStore, pend, filepath.Join(root, "vlm.json"))
 
-	// 注意 internal/export 没在这里注册：它的打包逻辑做完了，但「往哪儿写」要落盘那段
-	// Java 宿主补丁（票 13 第 2 步）。现在唯一能写的地方是应用私有目录 —— 而那里卸载就没了，
-	// 接上去等于交付一个恰好解决不了那张票核心问题的按钮。补丁落地时一并注册。
+	exportService := export.NewService(db, cardFiles{store: cardStore}, export.WithTempDir(root))
 
 	app := application.New(application.Options{
 		Name:        "错题本",
@@ -105,6 +104,8 @@ func main() {
 			application.NewService(agentService),
 			// 同一个对象既当 agentService 的提议出口，也自己绑给前端（待批准清单那一面）。
 			application.NewService(pend),
+			// 导出只露 Stage 那一面 —— 理由见 bundleStager 的注释。
+			application.NewService(&bundleStager{svc: exportService}),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
@@ -147,6 +148,21 @@ func (f cardFiles) RectifyAndSave(frame image.Image, quad library.Quad) (string,
 		return "", err
 	}
 	return hash.String(), nil
+}
+
+// bundleStager 是给前端的导出那一面。
+//
+// 为什么不直接把 *export.Service 注册上去：它还有 WriteBundle(io.Writer)，而 Wails 要拿
+// 导出的方法生成 TS 绑定 —— 一个 io.Writer 形参在 TS 那边没有对应的东西。所以这层只把
+// 界面用得上的 Stage 露出去；打包本身照旧在 export.Service 里，这层纯粹是绑定边界。
+type bundleStager struct{ svc *export.Service }
+
+func (b bundleStager) Stage() (export.Bundle, error) { return b.svc.Stage() }
+
+// PathByHash 是导出要的那一面：它按 hash 找**盘上的文件**（不像题库那样读成 image.Image），
+// 因为导出是把原样字节搬进 zip，不该先解码再编码一遍。
+func (f cardFiles) PathByHash(hash string) string {
+	return f.store.Path(capture.Hash(hash))
 }
 
 func (f cardFiles) RemoveByHash(hash string) error {
