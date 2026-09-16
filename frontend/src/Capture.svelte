@@ -39,6 +39,11 @@
   // 舞台的像素尺寸。帧铺多大、选框换算成屏幕上的哪一块，都从它来。
   let stageW = $state(0);
   let stageH = $state(0);
+  // 取景页（.capture）的像素尺寸。取景框按它算。
+  let rootW = $state(0);
+  let rootH = $state(0);
+  // 相机流的宽高比（宽/高）。真机上才知道，所以是状态而不是常量。
+  let frameAspect = $state(0);
   // 选框，归一化到帧上（定义见 CropBox 的 Box）。
   let crop = $state<Box>({ ...DEFAULT_BOX });
   // 入库后按 hash 取回的成品图（题图或答案图，PNG data URL）。
@@ -68,6 +73,32 @@
     const width = src.width * s;
     const height = src.height * s;
     return { left: (stageW - width) / 2, top: (stageH - height) / 2, width, height };
+  });
+
+  $effect(() => {
+    const el = root;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      rootW = el.clientWidth;
+      rootH = el.clientHeight;
+    });
+    ro.observe(el);
+    rootW = el.clientWidth;
+    rootH = el.clientHeight;
+    return () => ro.disconnect();
+  });
+
+  // 取景框：横向的矩形，铺在**可见帧**里占 92%（留一圈看得见帧边，才知道有没有拍出去）。
+  //
+  // 尺寸必须算、不能猜：帧是按 contain 铺开的，它在屏幕上占多大完全由流的宽高比决定。
+  // 用 CSS 的 aspect-ratio 写死一个比例，流的比例一旦对不上，框就压到黑边上了。
+  // 比例从流里读，于是这个框圈住的正好是"按下快门会拍到的那一块"。
+  const reticle = $derived.by(() => {
+    const ar = frameAspect;
+    if (ar <= 0 || rootW < 1 || rootH < 1) return null;
+    // 把帧的高度归一化成 1，宽度就是 ar；contain 取能塞进容器的那一档。
+    const h = Math.min(rootW / ar, rootH) * 0.92;
+    return { width: h * ar, height: h };
   });
 
   $effect(() => {
@@ -127,7 +158,11 @@
           `相机流实际拿到: ${settings?.width}x${settings?.height} @${settings?.frameRate ?? '?'}fps`,
         );
         el.srcObject = s;
-        return el.play();
+        return el.play().then(() => {
+          // 元数据到位后才有真实尺寸 —— 取景框要按它算，所以得在这一步读，
+          // 不能用约定俗成的 4:3 顶上（顶错了取景框就是个谎）。
+          if (el.videoWidth > 0) frameAspect = el.videoWidth / el.videoHeight;
+        });
       })
       .catch((err: unknown) => {
         errorText = err instanceof Error ? err.message : String(err);
@@ -359,7 +394,14 @@
       </div>
     </div>
   {:else}
-    <div class="reticle" aria-hidden="true"></div>
+    {#if reticle}
+      <!-- 尺寸由内联样式给（按流的真实比例算出来的），CSS 那边只管画法与居中。 -->
+      <div
+        class="reticle"
+        style="width: {reticle.width}px; height: {reticle.height}px;"
+        aria-hidden="true"
+      ></div>
+    {/if}
     {#if answerFor != null}
       <!-- 补拍态要看得出来自己在干什么，否则和拍新题长得一模一样。 -->
       <p class="mode">补拍答案图</p>
@@ -398,11 +440,7 @@
     top: 50%;
     left: 50%;
     translate: -50% -50%;
-    /* 横画幅（长边是水平边）—— 相机流是横的，取景框就得跟着横过来，
-       否则它在屏幕上框的那一块和实际拍下来的根本不是同一个形状。
-       相机流没有元数据能提前读到，4:3 是所有手机后摄的通行档，用它的比例就够。 */
-    width: min(72vw, 26rem);
-    aspect-ratio: 4 / 3;
+    /* 宽高由内联样式给 —— 那是按相机流的真实比例算的，这里写死就成猜了。 */
     border: 2px solid rgba(255, 255, 255, 0.9);
     border-radius: 1rem;
     /* 内一圈暗描边：亮场景下白框也不会糊掉。 */
