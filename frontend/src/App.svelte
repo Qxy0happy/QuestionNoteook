@@ -72,9 +72,20 @@
     goTo(CAPTURE_PAGE);
   }
 
+  // 补拍刚交回来的那道题（**更新过的**：answer_hash 已经写进去了）。
+  //
+  // 它要交给题库页去替换详情页手里那份快照 —— 不交的话详情页还停在补拍前的样子：
+  // AnswerHash 仍是空的，于是「重拍/补拍答案图」那个标签没变、**「看答案图」整个不出现**，
+  // 看着就像补拍没存上（用户报过两次）。
+  //
+  // 为什么不靠「切回题库页时重拉列表」那条路：那一条依赖翻页的可见性回调 —— 而这件事
+  // 必须在用户回来**之前**就已经是对的，他回到那一页时按钮就该在了。
+  let attachedQuestion = $state<Question | null>(null);
+
   // 补拍收工（用户按了「完成」），回到拍新题。
-  function answerAttached() {
+  function answerAttached(q: Question) {
     answerFor = null;
+    attachedQuestion = q;
   }
 
   let settle: ReturnType<typeof setTimeout> | undefined;
@@ -107,8 +118,9 @@
           <!-- 取景：挂载即开镜。上面没有引导层。 -->
           <Capture {answerFor} onAnswerAttached={answerAttached} />
         {:else if page.id === 'library'}
-          <!-- 题库：错题列表 + 点开看题图。切到这一页它自己会重拉一次列表。 -->
-          <Library onCaptureAnswer={startAnswer} />
+          <!-- 题库：错题列表 + 点开看题图。切到这一页它自己会重拉一次列表。
+               attachedQuestion 是「刚补拍完的那道题」，由它替换详情页手里那份快照。 -->
+          <Library onCaptureAnswer={startAnswer} attached={attachedQuestion} />
         {:else if page.id === 'review'}
           <!-- 复习：今日到期的队列 + 四档自评。同样是自己发现被划到可见时才拉队列。 -->
           <Review />

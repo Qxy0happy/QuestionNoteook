@@ -121,6 +121,8 @@ export class EnhancedShots {
   toggle(): void {
     this.enabled = !this.enabled;
     this.error = '';
+    // 换一个号，把还在飞的那一趟作废：它回来时会发现自己已经过期（见 #set）。
+    this.#token++;
     if (!this.enabled) {
       this.ms = 0;
       this.algoMs = 0;
@@ -134,12 +136,14 @@ export class EnhancedShots {
     this.ms = 0;
     this.algoMs = 0;
     this.error = '';
+    this.#token++; // 同上：把在飞的那一趟作废
     this.#release();
   }
 
   /** 换一道题、但**保留**开关：复习页用这个（一口气做十几道，每题重按一次会很烦）。 */
   resetKeepingEnabled(): void {
     this.error = '';
+    this.#token++;
     this.#release();
   }
 
@@ -176,8 +180,9 @@ export class EnhancedShots {
       if (!src) {
         // 这一槽没了（收起答案图、换了题）：放掉，并把「按原图算」那一档也退回默认 ——
         // 换一道题就是全新的一次查看，没道理沿用上一张的档位（那会白算一遍大图）。
-        this.#full[slot] = false;
-        await this.#swap(slot, null);
+        // 档位这一句也要看 token：晚到的那一次不该把新一次的状态改回去。
+        if (token === this.#token) this.#full[slot] = false;
+        await this.#set(slot, null, token);
         continue;
       }
       try {
@@ -193,28 +198,37 @@ export class EnhancedShots {
           this.algoMs = r.algoMs;
         }
         this.error = '';
-        await this.#swap(slot, r.url);
+        await this.#set(slot, r.url, token);
       } catch (err) {
         if (token === this.#token) {
           // 算不出来就照旧显示原图，把话说出来 —— 别让按钮亮着却什么都没变。
           this.error = err instanceof Error ? err.message : String(err);
-          await this.#swap(slot, null);
         }
+        await this.#set(slot, null, token);
       }
     }
   }
 
   /** 放掉两张、档位退回默认。不碰开关（那个由调用方按场景决定）。 */
   #release(): void {
-    void this.#swap('q', null);
-    void this.#swap('a', null);
+    void this.#set('q', null, this.#token);
+    void this.#set('a', null, this.#token);
     this.#full = { q: false, a: false };
   }
 
   // 换掉一个槽位里的 blob URL，并**在 DOM 换过 src 之后**放掉旧的那张。
   // 顺序不能反：提前 revoke，当前那张 <img> 指着的资源会被抽掉。
   // 不放也不行 —— 一张增强图是几百 KB 的 PNG，开关来回拨几十次就是几十 MB。
-  async #swap(slot: Slot, url: string | null): Promise<void> {
+  //
+  // **带 token，而且这一条是必需的**：换一道题时先后有两次 refresh —— 第一次的源是 null
+  // （先把旧图放掉），第二次才拿新图去算。而第一次可能**晚到**：它那句「放掉」会把第二次
+  // 刚设好的结果又清掉，于是新题的增强图一闪就没了、变回原图（用户报的「下一题又变回去」
+  // 就是它）。带上 token 之后，晚到的那一次自己作废。
+  async #set(slot: Slot, url: string | null, token: number): Promise<void> {
+    if (token !== this.#token) {
+      if (url) URL.revokeObjectURL(url); // 这一趟的结果已经作废，别留在内存里
+      return;
+    }
     const old = slot === 'q' ? this.q : this.a;
     if (old === url) return;
     if (slot === 'q') this.q = url;

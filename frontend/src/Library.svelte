@@ -26,7 +26,23 @@
 
   // 三页是同时挂载的，切到这一页才值得拉一次数据。
   // 题库页发起的「补拍答案图」：把这道题交给上层（App），由它切到取景页并进入补拍模式。
-  let { onCaptureAnswer }: { onCaptureAnswer?: (q: Question) => void } = $props();
+  // attached 是反过来的那一条：刚补拍完、**已经更新过**的那道题。
+  let {
+    onCaptureAnswer,
+    attached,
+  }: { onCaptureAnswer?: (q: Question) => void; attached?: Question | null } = $props();
+
+  // 补拍刚交回来的那道题：换掉详情页手里那份快照。
+  //
+  // 为什么必须走这条确定的路：详情页的 `opened` 是一份**快照**，补拍是从别的页做完回来的，
+  // 那期间库里已经改了 —— 不换的话 AnswerHash 还是空串，「重拍/补拍答案图」那个标签不变、
+  // **「看答案图」整个不出现**，看着就像补拍没存上。
+  //
+  // 后端已经确认过了：库里那行的 answer_hash 与图片文件都在。所以这里只需要把界面追上。
+  $effect(() => {
+    const q = attached;
+    if (q && opened && q.ID === opened.ID) opened = q;
+  });
 
   let root = $state<HTMLElement | null>(null);
 
