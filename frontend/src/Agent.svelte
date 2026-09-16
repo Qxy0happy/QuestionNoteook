@@ -29,6 +29,14 @@
     ConfigView as DigestConfigView,
     Slot,
   } from '../bindings/questionbook/internal/digest/models';
+  import * as Review from '../bindings/questionbook/internal/review/service';
+  import type {
+    Config as ReviewConfig,
+    ConfigView as ReviewConfigView,
+    RatingInterval,
+  } from '../bindings/questionbook/internal/review/models';
+  // 四档的名字与复习页共用一份（设置页这里要说「四档各推到多少天之后」）。
+  import { ratingLabel } from './ratings';
 
   // 默认停在「对话」：问 agent 是常用的那件事，配模型不是。
   let tab = $state<'chat' | 'settings'>('chat');
@@ -51,6 +59,23 @@
   let digestSaving = $state(false);
   let digestError = $state('');
   let digestSaved = $state('');
+
+  // ── 复习参数（票 18）──
+  //
+  // 只有两个旋钮：间隔模糊、考试日期。**没有**「最大间隔」那一栏 —— 上限是从考试日期
+  // 推出来的（ADR-0008），输入框越多，用户越不知道该填哪个。
+  let reviewView = $state<ReviewConfigView | null>(null);
+  // 表单里**还没保存**那份算出来的视图。它是「改一下就能看见间隔怎么变」的全部实现。
+  let reviewPreview = $state<ReviewConfigView | null>(null);
+  let reviewFuzz = $state(false);
+  let reviewExamDate = $state(''); // "YYYY-MM-DD"，空 = 不设
+  let reviewSaving = $state(false);
+  let reviewError = $state('');
+  let reviewSaved = $state('');
+
+  // 显示用哪一份：改了还没保存时按表单那份算出来的，否则按已保存那份。
+  // 分开存是因为 `reviewView` 还带着「设置文件坏了」那句 Problem，而预览那份没有。
+  const reviewShown = $derived(reviewPreview ?? reviewView);
 
   // 提交的补丁：**空串表示这一项不动**（Go 侧是补丁语义）。
   // 因为凭据读不回来，整份覆盖会把 key 抹掉，所以只能按项提交。
@@ -233,6 +258,7 @@
         if (entry.isIntersecting) {
           void load();
           void loadDigest();
+          void loadReview();
         }
       }
     });
@@ -324,6 +350,72 @@
       digestError = errorMessage(err);
     } finally {
       digestSaving = false;
+    }
+  }
+
+  // ── 复习参数 ──
+
+  async function loadReview() {
+    try {
+      const v = await Review.Config();
+      reviewView = v;
+      reviewPreview = null;
+      reviewFuzz = v.Fuzz;
+      reviewExamDate = v.ExamDate;
+      reviewError = '';
+    } catch (err) {
+      reviewError = errorMessage(err);
+    }
+  }
+
+  // previewReview 按**表单里现在这份**算一遍间隔预览。
+  //
+  // 不等保存就显示，是因为这一页要回答的就是「这么设之后间隔变多长」—— 那个答案要在按下
+  // 保存之前看到，否则每试一个日期都是一次真的写入（还会顺手拉一批到期日回来）。
+  // 算不出来（日期正打到一半）就退回按已保存那份显示，**不弹错**：他还在打字。
+  async function previewReview() {
+    try {
+      reviewPreview = await Review.Preview({ fuzz: reviewFuzz, exam_date: reviewExamDate });
+    } catch {
+      reviewPreview = null;
+    }
+  }
+
+  // 预览那行字：四档各多少天。
+  //
+  // 开着模糊时这几个数每次读都差几个百分点 —— 那是「模糊」的定义（Go 侧 config.go 里
+  // 写着），不是界面在抽风，所以下面那行字里要说明一句。
+  function intervalsText(list: RatingInterval[] | null): string {
+    if (!list || list.length === 0) return '算不出来';
+    return list.map((ri) => `${ratingLabel(ri.Rating)} ${ri.Days} 天`).join(' · ');
+  }
+
+  async function saveReview() {
+    if (reviewSaving) return;
+    reviewSaving = true;
+    reviewSaved = '';
+    try {
+      // 键名是小写的那两个：Go 侧 Config 带 json tag（fuzz / exam_date），生成的类型用的
+      // 就是 tag 名 —— 写 Go 的字段名编译期就过不去（与 digest / vlm 同一个规矩）。
+      const cfg: ReviewConfig = { fuzz: reviewFuzz, exam_date: reviewExamDate };
+      // 整份提交，不是补丁：这一份没有凭据要护着。
+      const res = await Review.SetConfig(cfg);
+      reviewView = res.View;
+      reviewPreview = null;
+      reviewFuzz = res.View.Fuzz;
+      reviewExamDate = res.View.ExamDate;
+      reviewError = '';
+      // 「拉回来几道」必须说出来：用户改一个日期，库里一批题的到期日刚刚被动了，
+      // 那不该悄悄发生。
+      reviewSaved =
+        res.PulledBack > 0
+          ? `已保存。有 ${res.PulledBack} 道题的到期日排在这个上限之外，已经拉回来。`
+          : '已保存';
+    } catch (err) {
+      // 日期写坏了会被后端当场退回、不落盘，所以照实显示，别假装存上了。
+      reviewError = errorMessage(err);
+    } finally {
+      reviewSaving = false;
     }
   }
 
@@ -573,6 +665,69 @@
 
       <!-- 这几块设置共用一个滚动区：各给一个 .form 会各带一条滚动条，
            手机上滑起来会分不清自己在滚哪一块。 -->
+      <hr class="sep" />
+
+      <!-- ── 复习参数（票 18）──
+           只有两个旋钮：考试日期、间隔模糊。**没有**「最大间隔」那一栏 —— 上限是从考试
+           日期推出来的（ADR-0008），多一个要手填的天数只会让人不知道该填哪个。 -->
+      <p class="note">
+        间隔由 FSRS 算（官方算法与权重，只把「学习步」关掉了）。要说的其实是「考试之前
+        都得再过一遍」，所以上限是从考试日期推出来的，不用你手填一个天数。
+      </p>
+
+      {#if reviewView?.Problem}
+        <p class="banner warn">{reviewView.Problem}</p>
+      {/if}
+      {#if reviewError}
+        <p class="banner">{reviewError}</p>
+      {/if}
+      {#if reviewSaved}
+        <p class="banner ok">{reviewSaved}</p>
+      {/if}
+
+      <label>
+        <span>考试日期<span class="opt">空着就不限</span></span>
+        <!-- type="date" 唤起系统日期选择器：手机上手敲「2026-12-19」很容易错一位。
+             它的值就是 "YYYY-MM-DD"，与 Go 侧那个格式一字不差。 -->
+        <input type="date" bind:value={reviewExamDate} oninput={previewReview} />
+      </label>
+
+      {#if reviewShown}
+        <p class="note">
+          {#if reviewShown.ExamDate === ''}
+            现在没有上限：四档最长能排到 {reviewShown.MaxIntervalDays} 天之后。
+            填上考试日期，间隔就会被压到那一天之内。
+          {:else if reviewShown.ExamActive}
+            距考试 {reviewShown.DaysToExam} 天：任何评级都不会把题排到
+            {reviewShown.MaxIntervalDays} 天以后，也就是考试那天之前。
+          {:else}
+            这个日期已经过去了，上限不再生效 —— 现在按默认的不限
+            （{reviewShown.MaxIntervalDays} 天）排。
+          {/if}
+        </p>
+
+        <p class="note">
+          按这一套参数的间隔：新卡 {intervalsText(reviewShown.Preview.New)}；
+          复习过的卡 {intervalsText(reviewShown.Preview.Reviewed)}。
+          {#if reviewShown.Fuzz}
+            开着模糊，这几个数每次看会差几个百分点 —— 也正因如此，同一天评的题不会永远
+            撞在同一天到期。
+          {/if}
+        </p>
+      {/if}
+
+      <label class="row">
+        <input type="checkbox" bind:checked={reviewFuzz} onchange={previewReview} />
+        <span>间隔模糊<span class="opt">把同一天到期的题散开</span></span>
+      </label>
+
+      <div class="actions">
+        <button class="pill go" onclick={saveReview} disabled={reviewSaving}>
+          {reviewSaving ? '保存中…' : '保存'}
+        </button>
+        <button class="pill" onclick={loadReview} disabled={reviewSaving}>重新读取</button>
+      </div>
+
       <hr class="sep" />
 
       <p class="note">
@@ -867,8 +1022,9 @@
     accent-color: #9fd4ff;
   }
 
-  /* 时间选择器的那个小钟表图标是深色的，深色底上几乎看不见，翻成白的。 */
-  input[type='time']::-webkit-calendar-picker-indicator {
+  /* 时间与日期选择器那个图标是深色的，深色底上几乎看不见，翻成白的。 */
+  input[type='time']::-webkit-calendar-picker-indicator,
+  input[type='date']::-webkit-calendar-picker-indicator {
     filter: invert(1);
     opacity: 0.55;
   }

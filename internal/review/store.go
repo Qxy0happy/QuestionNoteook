@@ -154,6 +154,33 @@ func (s *Store) save(questionID int64, rating fsrs.Rating, card fsrs.Card) error
 	return tx.Commit()
 }
 
+// clampDue 把到期时刻晚于「now 之后 days 天」的复习状态拉回到那一刻，返回动了几行。
+//
+// **只动 due_at**。stability 与 difficulty 是「这个人对这道题记得多牢」的估计，是 FSRS
+// 从他的评级史里学出来的 —— 为了配合一个新的上限去改它们，等于伪造他过去的表现，
+// 而且下一次评级的起点就错了。改 due_at 只是**提前复习**：那是 FSRS 允许的用法
+// （提前复习时稳定度涨得少一点，仅此而已），不是把算法骗过去。
+// scheduled_days 也不动 —— 它是「上次排出去时算的是多少天」，是历史。
+//
+// 只往回拉，不往远推：到期日比上限近的题一行都不碰。也**不恢复** —— 上限放宽（考试日期
+// 往后改、或者清掉）时，已经拉近的到期日不会自己弹回去，那一步要用到的信息在拉的时候
+// 就已经没了。
+func (s *Store) clampDue(now time.Time, days int) (int, error) {
+	// 与调度那边同一个口径：N 天 = N × 24 小时（不是 AddDate）。
+	// 只有一处口径，被拉回来的到期日才会与「若此刻重新评一次会算出的时刻」逐位一致。
+	limit := now.Add(time.Duration(days) * 24 * time.Hour).UnixMilli()
+	res, err := s.db.Exec(`UPDATE review_states SET due_at = ? WHERE due_at > ?`, limit, limit)
+	if err != nil {
+		return 0, fmt.Errorf("把到期日拉回上限之内: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		// 拿不到行数不算失败：设置已经存下去了，少一句「动了几道」不该变成一次报错。
+		return 0, nil
+	}
+	return int(n), nil
+}
+
 // lastReviewMS 把卡上的上次复习时刻换成库里存的毫秒。
 //
 // 零值存 0（与 card 那边读回来时的约定对称）；直接 .UnixMilli() 会得到一个很大的负数，

@@ -11,6 +11,11 @@ export {
 } from "./models.js";
 
 export type {
+    Config,
+    ConfigView,
+    Preview,
     QueueItem,
-    ReviewResult
+    RatingInterval,
+    ReviewResult,
+    SaveResult
 } from "./models.js";

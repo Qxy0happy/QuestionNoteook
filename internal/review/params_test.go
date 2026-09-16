@@ -8,16 +8,22 @@ import (
 	"github.com/open-spaced-repetition/go-fsrs/v4"
 )
 
-// 这条把「我们的调度器与**官方默认**差在哪」钉死。
+// 这条把「我们的调度器与**官方默认**差在哪」钉死 —— 针对的是**默认设置**
+// （没填考试日期、没开模糊）。
 //
 // 它防的是一类**静默**的坏：库升级之后默认权重 / 保留率 / 上限悄悄变了，复习间隔于是整体变了，
 // 而没有任何东西会红 —— 「你确定 FSRS 是完好的吗」这个问题的正确答案不该是「我读过代码，看着对」。
 //
-// 所以这里逐字段比，并把「**只允许一处偏离**」写成断言：将来要再偏离一处，得先改这条测试，
-// 而那一步是**故意**要人停下来想一想的。
+// 所以这里逐字段比，并把「**默认设置下只允许一处偏离**」写成断言：将来要再偏离一处，得先改
+// 这条测试，而那一步是**故意**要人停下来想一想的。
+//
+// 票 18 之后用户自己能把上限压下来（填考试日期）、把模糊打开 —— 那两处偏离由下面
+// TestConfiguredParamsReachTheScheduler 盯着：它验的是「设置真的送到了库里」，
+// 而不是「我们算出了一个数」。
 func TestSchedulerDeviatesFromDefaultsInExactlyOnePlace(t *testing.T) {
 	want := fsrs.DefaultParam()
-	got := newScheduler().Parameters
+	now := time.Date(2026, 9, 16, 10, 0, 0, 0, time.Local)
+	got := DefaultConfig().params(now)
 
 	// 先把「库的默认是什么」也钉住：上游把默认值本身改了，这两条会先红 ——
 	// 好过让下面那些逐字段比较去猜是上游变了还是我们变了。
@@ -66,8 +72,9 @@ func TestSchedulerDeviatesFromDefaultsInExactlyOnePlace(t *testing.T) {
 // 只要最短一档 ≥ 1 天，评完的题当天就不可能回到队列里（见 newScheduler 的注释）。
 // 顺带把实际数字打出来，改动参数时能一眼看到间隔怎么变的。
 func TestFourRatingsAreStrictlyOrderedAndAtLeastOneDay(t *testing.T) {
-	sched := newScheduler()
 	now := time.Date(2026, 9, 16, 10, 0, 0, 0, time.Local)
+	// 默认设置（没填考试日期）：四档的数值就是票 08 记下的那一组。
+	sched := fsrs.NewFSRS(DefaultConfig().params(now))
 
 	// 造一张「复习过几次」的卡，而且**每次都要把时钟推到到期那一刻** ——
 	// 在同一时刻连喂三次是不现实的情形：那时 elapsedDays 恒为 0，而遗忘曲线在 R=1 时
@@ -128,9 +135,9 @@ func TestFourRatingsAreStrictlyOrderedAndAtLeastOneDay(t *testing.T) {
 // 若哪天改成「当天零点 + N 天」，那么一次晚上 23:00 的复习会把到期日**提前**一整天，
 // 而这正是这条测试会拦住的那类改动。
 func TestDueIsTheIntervalAwayFromTheReviewMoment(t *testing.T) {
-	sched := newScheduler()
 	// 特意取一个接近日界线的时刻：这是「按天取」与「按绝对时刻取」最容易分道扬镳的地方。
 	now := time.Date(2026, 9, 16, 23, 30, 0, 0, time.Local)
+	sched := fsrs.NewFSRS(DefaultConfig().params(now))
 
 	info, err := sched.Next(fsrs.NewCard(now), now, fsrs.Good)
 	if err != nil {
@@ -154,5 +161,123 @@ func TestDueIsTheIntervalAwayFromTheReviewMoment(t *testing.T) {
 	if !info.Card.Due.Before(endOfToday(dayN)) {
 		t.Errorf("到期 %v 不在第 %d 天（%v）之内，那天它不会出现在队列里",
 			info.Card.Due, info.Card.ScheduledDays, dayN)
+	}
+}
+
+// 设置真的送到了库里 —— 不是「我们算出了一个数」。
+//
+// 这条防的是另一类静默的坏：设置存下去了、界面也显示着，而那值从来没被塞进
+// fsrs.Parameters 过（漏一次赋值、改个字段名都会这样，而且**没有任何东西会红**：
+// 复习照常跑，间隔照旧长）。所以这里比的是**从参数里读出来的**结果。
+func TestConfiguredParamsReachTheScheduler(t *testing.T) {
+	want := fsrs.DefaultParam()
+	now := time.Date(2026, 9, 16, 10, 0, 0, 0, time.Local)
+
+	cfg := Config{Fuzz: true, ExamDate: "2026-12-19"} // 距 now 正好 94 天
+	got := cfg.params(now)
+
+	if !got.EnableFuzz {
+		t.Error("设置了模糊，但调度器拿到的 EnableFuzz 还是 false")
+	}
+	const wantDays = 94
+	if got.MaximumInterval != wantDays {
+		t.Errorf("MaximumInterval = %v，想要距考试的天数 %d", got.MaximumInterval, wantDays)
+	}
+
+	// 其余各项仍必须是官方默认：这一页只露两个旋钮，不该顺手动到别的。
+	if got.RequestRetention != want.RequestRetention {
+		t.Errorf("RequestRetention = %v，官方默认是 %v（这一项在界面上根本没得改）",
+			got.RequestRetention, want.RequestRetention)
+	}
+	if got.W != want.W {
+		t.Error("权重被动过了 —— 设置页只该改模糊与上限")
+	}
+	if got.EnableShortTerm {
+		t.Error("学习步应当仍然是关掉的")
+	}
+}
+
+// 上限**每天重算**：时钟往前走一天，它就小一天。
+//
+// 它防的是「启动时算好存下来」那种写法 —— 那样过了午夜上限就旧一天，而复习恰恰是
+// 每天早上的事。所以这里把时钟推着走，而不是比一个常量。
+func TestExamCapIsRecomputedEachDay(t *testing.T) {
+	cfg := Config{ExamDate: "2026-12-19"}
+	day := time.Date(2026, 12, 1, 8, 0, 0, 0, time.Local)
+
+	for i := range 5 {
+		at := day.AddDate(0, 0, i)
+		want := float64(18 - i) // 12/1 距 12/19 是 18 天
+		if got, active := cfg.maxInterval(at); !active || got != want {
+			t.Fatalf("%v：上限 = %v（active=%v），想要 %v 天且生效",
+				at.Format(dateLayout), got, active, want)
+		}
+	}
+}
+
+// 考试日期过去之后，上限**不再生效**，退回官方默认。
+//
+// 这一支要是漏了，天数会变成负数、被夹到 1，于是每道题每天都到期、队列一次炸开。
+// 所以这里断言的恰恰是「它没有变成一个小数字」。
+func TestPastExamDateFallsBackToLibraryDefault(t *testing.T) {
+	def := fsrs.DefaultParam().MaximumInterval
+	cfg := Config{ExamDate: "2026-12-19"}
+	after := time.Date(2026, 12, 20, 9, 0, 0, 0, time.Local)
+
+	got, active := cfg.maxInterval(after)
+	if active {
+		t.Error("考试已经过去了，上限不该还算「生效」—— 界面要照这个字段把话说明白")
+	}
+	if got != def {
+		t.Errorf("上限 = %v，考过去之后应当退回官方默认 %v（夹到 1 会让每道题每天都到期）",
+			got, def)
+	}
+}
+
+// 考试当天：上限给 1 天。
+//
+// 给 0 会被官方库判为非法，而它的兜底是**悄悄换回 36500** —— 那就成了「填了考试日期
+// 却毫无作用」，比给 1 天更让人摸不着头脑。
+func TestExamTodayGivesOneDayNotZero(t *testing.T) {
+	cfg := Config{ExamDate: "2026-12-19"}
+	onExam := time.Date(2026, 12, 19, 7, 0, 0, 0, time.Local)
+
+	got, active := cfg.maxInterval(onExam)
+	if !active || got != 1 {
+		t.Fatalf("考试当天：上限 = %v（active=%v），想要 1 天且生效", got, active)
+	}
+	p := cfg.params(onExam)
+	if err := p.Validate(); err != nil {
+		t.Errorf("这套参数官方库不认（那它会被悄悄换成默认值）：%v", err)
+	}
+}
+
+// 预览要能看：四档都在、顺序对，而且**都被上限压着**。
+//
+// 这一页唯一要回答的问题就是「这么设之后间隔变多长」，所以把数打出来 ——
+// 参数改动时一眼能看到间隔怎么变的。
+func TestPreviewRespectsTheCap(t *testing.T) {
+	now := time.Date(2026, 9, 16, 10, 0, 0, 0, time.Local)
+	const capDays = 94
+	p := preview(Config{ExamDate: "2026-12-19"}.params(now), now)
+
+	for _, row := range []struct {
+		name string
+		got  []RatingInterval
+	}{{"新卡", p.New}, {"复习过三次的卡", p.Reviewed}} {
+		if len(row.got) != 4 {
+			t.Fatalf("%s：预览有 %d 格，想要 4 格", row.name, len(row.got))
+		}
+		for i, ri := range row.got {
+			if ri.Rating != Rating(i+1) {
+				t.Errorf("%s：第 %d 格是 %v，四档的顺序应当是 Again/Hard/Good/Easy",
+					row.name, i+1, ri.Rating)
+			}
+			if ri.Days < 1 || ri.Days > capDays {
+				t.Errorf("%s：%v 是 %d 天 —— 应当落进 1..%d（上限就是距考试的天数）",
+					row.name, ri.Rating, ri.Days, capDays)
+			}
+			t.Logf("%s %v = %d 天", row.name, ri.Rating, ri.Days)
+		}
 	}
 }

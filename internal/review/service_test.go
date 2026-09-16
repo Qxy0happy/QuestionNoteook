@@ -55,7 +55,7 @@ func newService(t *testing.T, at time.Time) (*review.Service, *library.Store, *c
 	t.Cleanup(func() { lib.Close() })
 
 	c := newClock(at)
-	return review.NewService(lib, review.WithNow(c.Now)), lib, c
+	return review.NewService(lib, filepath.Join(t.TempDir(), "review.json"), review.WithNow(c.Now)), lib, c
 }
 
 // addQuestion 落一道错题，创建时间显式给 —— 队列里「新题从创建那一刻起就到期」，
@@ -435,7 +435,7 @@ func TestUpgradeFromOlderSchema(t *testing.T) {
 	t.Cleanup(func() { reopened.Close() })
 
 	clk := newClock(base)
-	svc := review.NewService(reopened, review.WithNow(clk.Now))
+	svc := review.NewService(reopened, filepath.Join(t.TempDir(), "review.json"), review.WithNow(clk.Now))
 
 	// 老题还在，而且立刻就该复习。
 	assertQueued(t, svc, old.ID)

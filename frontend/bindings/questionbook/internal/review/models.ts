@@ -6,6 +6,89 @@
 import * as library$0 from "../library/models.js";
 
 /**
+ * Config 是复习参数的设置。**不进 SQLite** —— 照 vlm / digest 的做法（库外 JSON，
+ * 与 library.db 并列）：配置不属于错题的数据模型，也不该跟着导出包被搬到别的手机上
+ * （「这个人的考试在 12 月 19 日」对换手机的人没有意义）。
+ * 
+ * 只有两项（ADR-0008）：FSRS 有 21 个权重、期望保留率、最大间隔、模糊开关，这里只露
+ * 模糊与考试日期 —— 保留率与手填上限都是多余的旋钮，上限由考试日期推出来。
+ */
+export interface Config {
+    /**
+     * Fuzz 打开官方库的间隔模糊。默认关（与官方默认一致）。
+     * 
+     * 关着的时候同一天评级的题会**永远**撞在同一天到期（今天拍的一批题都评 Good，
+     * 196 天后同一天全到期），复习量一阵一阵的。打开之后间隔散开几个百分点。
+     * 顺带一句：官方库在间隔小于 2.5 天时不模糊（fuzz.go），所以 Again 那一档仍是准数。
+     */
+    "fuzz": boolean;
+
+    /**
+     * ExamDate 是考试日期，本地日历上的那一天，形如 "2026-12-19"；空 = 没设。
+     * 
+     * 它是**日期**不是时刻：算的是「还剩几个日历天」，与几点钟无关。
+     */
+    "exam_date": string;
+}
+
+/**
+ * ConfigView 是复习参数设置的「界面版」。
+ * 
+ * 与 digest 那份不同，这里的设置**没有任何秘密**：界面拿到是真的值，也是真的值传回来。
+ */
+export interface ConfigView {
+    /**
+     * Path 是设置文件的落点（安卓上用户平时够不着，出问题时至少知道去哪儿找）。
+     */
+    "Path": string;
+    "Fuzz": boolean;
+    "ExamDate": string;
+
+    /**
+     * DaysToExam 是距考试还有几个日历天（负数 = 已经过去）。仅在 ExamDate 非空时有意义。
+     */
+    "DaysToExam": number;
+
+    /**
+     * ExamActive 说的是「考试日期这个上限现在有没有生效」—— 没填、或者考过了，都是 false。
+     * 界面必须把这件事说出来，否则用户会以为填了没用（或者以为它还在管着）。
+     */
+    "ExamActive": boolean;
+
+    /**
+     * MaxIntervalDays 是**当前生效的**最大间隔（天）。
+     * 
+     * 没填考试日期时它就是官方默认那个数，一样显示出来 —— 用户要能看出「填了会变成多少」。
+     */
+    "MaxIntervalDays": number;
+
+    /**
+     * Preview 是四档在当前参数下的间隔。
+     */
+    "Preview": Preview;
+
+    /**
+     * Problem 非空时说明设置文件有问题（读不了、写坏了、日期解析不了），
+     * 此时上面几项是**默认值** —— 界面不是白的，用户还能把它改回去。
+     */
+    "Problem": string;
+}
+
+/**
+ * Preview 是「按现在这套参数，四档分别会推到多少天之后」。
+ * 
+ * 两行：新卡（还没复习过）与复习过三次的卡。给出它是因为复习参数这一页唯一要回答的
+ * 问题就是「这么设之后间隔到底变多长」—— 让用户对着两份配置自己猜，是这一页最容易
+ * 失败的地方。
+ * 
+ * 开着模糊时这几行**每次看都不一样**（差几个百分点）—— 那是模糊的定义，不是算错了。
+ */
+export interface Preview {
+    "New": RatingInterval[] | null;
+    "Reviewed": RatingInterval[] | null;
+}
+
+/**
  * QueueItem 是复习队列里的一条：一道错题，加上它现在的到期时刻。
  * 
  * 题本身整个带回来（而不是只给一个 id）是因为复习界面要用它的两个 hash 去取题图与答案图
@@ -59,6 +142,15 @@ export enum Rating {
 };
 
 /**
+ * RatingInterval 是预览里的一格：哪一档、多少天之后。Rating 用的就是四档那个类型，
+ * 界面照自己那套标签显示，不必在这里再写一遍中文名。
+ */
+export interface RatingInterval {
+    "Rating": Rating;
+    "Days": number;
+}
+
+/**
  * ReviewResult 是一次复习的结果：喂进去的评级，和 FSRS 算出来的下一次到期。
  * 
  * 与服务端落库的那两行是同一个来源 —— 界面拿它显示「下次：3 天后」，不必再回库问一次。
@@ -81,4 +173,19 @@ export interface ReviewResult {
      * 当时算出的间隔（天）
      */
     "ScheduledDays": number;
+}
+
+/**
+ * SaveResult 是保存设置之后带回来的：新的设置（含预览），以及这次顺手动了几行到期日。
+ */
+export interface SaveResult {
+    "View": ConfigView;
+
+    /**
+     * PulledBack 是「到期日原本排在生效上限之外、这次被拉回来的」题目数。
+     * 
+     * 只在有生效上限时才可能非 0。它是界面必须说出来的一件事：用户改了考试日期之后，
+     * 库里那些排到几个月后的题刚刚**被动了**，那不该悄悄发生。
+     */
+    "PulledBack": number;
 }

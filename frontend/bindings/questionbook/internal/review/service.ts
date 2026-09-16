@@ -18,6 +18,16 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 import * as $models from "./models.js";
 
 /**
+ * Config 返回当前的复习参数设置（含四档预览）；文件坏了就退回默认值，并把问题带回去。
+ * 
+ * 每次都**重读一遍文件**，不只读缓存：这一页是用户改设置的地方，它显示的必须是他刚存下的
+ * 那一份。顺带把缓存也刷新了 —— 排程与界面看到的因此是同一个值。
+ */
+export function Config(): $CancellablePromise<$models.ConfigView> {
+    return $Call.ByID(3590061656);
+}
+
+/**
  * Grade 记录一次复习：把评级交给 FSRS 算出下一次到期，落库，并把结果带回来。
  * 
  * 题不存在返回 library.ErrNotFound，评级不是四档之一返回 ErrInvalidRating；
@@ -31,9 +41,23 @@ export function Grade(questionID: number, rating: $models.Rating): $CancellableP
 }
 
 /**
+ * Preview 按**传进来的这份设置**算一遍视图：不落盘、不动库、也不改缓存。
+ * 
+ * 为什么值得单开一个方法，而不是等 SetConfig 的返回值：这一页唯一要回答的问题是
+ * 「这么设之后间隔变多长」，而那个答案要在按下保存**之前**就看得见 —— 否则每试一个日期
+ * 都是一次真的写入（还会顺手拉一批到期日回来）。
+ * 
+ * 日期不合法时返回错误，界面那侧静默退回「按已保存那份显示」：用户还在打字的中间，
+ * 一个打了一半的日期不该弹一句红字。
+ */
+export function Preview(c: $models.Config): $CancellablePromise<$models.ConfigView> {
+    return $Call.ByID(3834838082, c);
+}
+
+/**
  * Queue 返回当前的**今日复习队列**：到期日是今天或更早的错题，最该复习的在前。
  * 
- * 队列的长度就是「今天还剩多少道」—— 评过的题会把到期推到至少明天（见 newScheduler），
+ * 队列的长度就是「今天还剩多少道」—— 评过的题会把到期推到至少明天（见 Config.params），
  * 所以做完一道它就少一道，中途重进本页也不会把刚做过的捞回来。
  * 
  * 判定按**本地日**取，取到次日零点为止（endOfToday）。这么定的理由、以及它与「到期其实
@@ -41,4 +65,17 @@ export function Grade(questionID: number, rating: $models.Rating): $CancellableP
  */
 export function Queue(): $CancellablePromise<$models.QueueItem[] | null> {
     return $Call.ByID(1015212025);
+}
+
+/**
+ * SetConfig 存下复习参数，并把库里已经排到生效上限之外的到期日拉回来。
+ * 
+ * 拉回来放在这里、而不是每次算调度参数时顺手做，因为那是一个**用户动作**的结果
+ * （他填了或者改了考试日期）：要能给他一个「动了几道」的数字，而且不该天天偷偷改库。
+ * 
+ * 顺序是先落盘再动库 —— 反过来的话会留下「库已经被改了，而设置没存下去」的状态，
+ * 那个上限下次就没人记得，被拉的题白拉。
+ */
+export function SetConfig(c: $models.Config): $CancellablePromise<$models.SaveResult> {
+    return $Call.ByID(719005648, c);
 }

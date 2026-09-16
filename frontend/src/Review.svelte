@@ -18,6 +18,9 @@
   import type { Tag } from '../bindings/questionbook/internal/tags/models';
   import AnswerBadge from './AnswerBadge.svelte';
   import Discussion from './Discussion.svelte';
+  // 四档的名字（与「数值 → 名字」那一步）只在 ratings.ts 里写一遍，
+  // 设置页的四档间隔预览用的是同一份。
+  import { RATINGS, ratingLabel } from './ratings';
 
   let root = $state<HTMLElement | null>(null);
 
@@ -62,22 +65,8 @@
   let tags = $state<Tag[]>([]);
   let grading = $state(false);
 
-  // 四档。档位名沿用 CONTEXT.md 里的英文；后面那句中文是自评时最容易犹豫的地方 ——
-  // 「Good 还是 Easy」得说清楚。
-  const RATINGS = [
-    { value: Rating.Again, label: 'Again', hint: '没想起来' },
-    { value: Rating.Hard, label: 'Hard', hint: '很费劲' },
-    { value: Rating.Good, label: 'Good', hint: '想起来了' },
-    { value: Rating.Easy, label: 'Easy', hint: '太简单' },
-  ] as const;
-
   function errorMessage(err: unknown): string {
     return err instanceof Error ? err.message : String(err);
-  }
-
-  // 评完那一条要显示刚评的是哪一档。返回来的是枚举的数值（3），不能直接亮出去。
-  function ratingLabel(rating: Rating): string {
-    return RATINGS.find((r) => r.value === rating)?.label ?? String(rating);
   }
 
   // 「下次 3 天后」。间隔是 Go 侧算出来的整天数；1 天就是明天 ——

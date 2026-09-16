@@ -112,7 +112,7 @@ func newHarnessCfg(t *testing.T, cfg vlm.Config, provider vlm.Provider) *harness
 	asker := vlm.NewService(libSvc, tagSvc, cfgPath, opts...)
 
 	// 复习服务只有一份，与 main.go 一样：推荐要基于的正是复习页看到的那条队列。
-	reviewSvc := review.NewService(lib, review.WithNow(clk.Now))
+	reviewSvc := review.NewService(lib, filepath.Join(t.TempDir(), "review.json"), review.WithNow(clk.Now))
 
 	return &harness{
 		svc:    workload.NewService(reviewSvc, lib, asker, workload.WithNow(clk.Now)),

@@ -2,6 +2,7 @@ package review
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/open-spaced-repetition/go-fsrs/v4"
@@ -16,10 +17,17 @@ import (
 type Service struct {
 	store     *Store
 	questions *library.Store
-	scheduler *fsrs.FSRS
+	// cfgPath 是复习参数的设置文件（库外 JSON，与 library.db 并列），见 Config。
+	cfgPath string
 	// 取「现在」的方式。做成字段是为了能在测试里钉死 —— 「今天」是哪一天直接决定
-	// 队列里有什么，用真实时钟就没法断言边界。
+	// 队列里有什么、上限还剩几天，用真实时钟就没法断言边界。
 	now func() time.Time
+
+	// cfg 是缓存下来的设置。读写都要过 mu：设置从界面那侧随时可能被改，
+	// 而每一次复习是另一个 goroutine。读的是缓存、不是每次都读文件 ——
+	// 但 scheduler 仍然会拿「此刻」重新推上限，见 params。
+	mu  sync.RWMutex
+	cfg Config
 }
 
 // Option 给服务补一样可选能力。
@@ -30,15 +38,21 @@ func WithNow(now func() time.Time) Option {
 	return func(s *Service) { s.now = now }
 }
 
-// NewService 用一个已经开好的错题库构造复习服务。
+// NewService 用一个已经开好的错题库和一份设置文件的落点构造复习服务。
 //
 // 复习用的连接就是题库那一条（ADR-0004 只把**图片**放到库外，元数据都在这一份 SQLite 里），
 // 不再 Open 第二个到同一文件的连接：WAL 下能跑，但没有理由让两个池抢同一把写锁。
-func NewService(questions *library.Store, opts ...Option) *Service {
+//
+// 设置文件**不存在**是正常状态（刚装上）；**读坏了**也不拦着服务起来 —— 那两种情况都退回
+// 默认设置，问题由 Config 带给界面（见 loadConfigFile）。
+func NewService(questions *library.Store, cfgPath string, opts ...Option) *Service {
+	// 这里不记「文件有什么问题」：Config 每次都重读一遍，那一处才把它端给界面。
+	cfg, _ := loadConfigFile(cfgPath)
 	s := &Service{
 		store:     NewStore(questions.DB()),
 		questions: questions,
-		scheduler: newScheduler(),
+		cfgPath:   cfgPath,
+		cfg:       cfg,
 		now:       time.Now,
 	}
 	for _, opt := range opts {
@@ -47,32 +61,48 @@ func NewService(questions *library.Store, opts ...Option) *Service {
 	return s
 }
 
-// newScheduler 造出官方 FSRS-6 的调度器：官方默认权重（ADR-0002 钉的），
-// 只把**学习步**（short-term steps）关掉。
+// params 按当前缓存下来的设置与**此刻**算出调度参数。
 //
-// 关掉它的理由是尺度对不上。默认参数带学习步，四档的间隔是分钟级的（Again 1 分钟 /
-// Hard 6 分钟 / Good 10 分钟），而这个应用是**每日**复习仪式：队列问的是「今天该复习
-// 哪些」，通知问的是「今天到期多少」，界面上写的是「今天还剩多少道」。留着分钟级的步长
-// 会有两个后果 ——
+// 每次用的时候现算，不在构造服务时算好存着：上限是「距考试还有几天」，存下来的话
+// 过了午夜它就旧一天 —— 而复习恰恰是每天早上的事。算一遍只是填一个参数结构体，
+// 这个开销可以忽略。
+func (s *Service) params() fsrs.Parameters {
+	s.mu.RLock()
+	cfg := s.cfg
+	s.mu.RUnlock()
+	return cfg.params(s.now())
+}
+
+// clampToCap 把一次评级算出的下一张卡收进上限之内。
 //
-//  1. 「今天还剩多少道」在同一分钟里自己变；
-//  2. 刚评过的题一两分钟后又到期、又出现在队列里，与「评过的题在本次队列里不再出现」
-//     直接冲突。
+// 要我们自己收这一道，是因为**官方库的 MaximumInterval 是软的**：它先把每一档夹到上限，
+// 再为了保住 Again < Hard < Good < Easy 的严格次序往上加。实测（上限 94 天、复习过三次
+// 的卡）：Hard 94 / Good **95** / Easy **96** —— 「任何评级都不会排到上限之外」这句话，
+// 库本身给不了，它能超出上限两天。
 //
-// 关掉之后走官方库里的 long-term 调度器：它保证四档里最短的一档也至少推到**一天**之后
-// （nextInterval 里那句 max(…, 1)，再被 Again ≤ Hard−1 ≤ Good−2 逐档拉开）。于是
-// 「评过的题今天不会再出现」是一条结构上的保证，而不是靠「间隔通常够长」。
+// 而这一票要的正是那句话：上限是**从考试日期推出来的**，超出两天就是考后两天。
+// 所以收在最后一刻，收成硬的。
 //
-// 权重没有动：还是官方的默认向量，没有自训练，也没有改 RequestRetention / MaximumInterval。
-func newScheduler() *fsrs.FSRS {
-	params := fsrs.DefaultParam()
-	params.EnableShortTerm = false
-	return fsrs.NewFSRS(params)
+// 收的只是**排出去的日期**（Due 与 ScheduledDays）：stability 与 difficulty 仍是库算的
+// 原值 —— 那两列是「这道题记得多牢」的估计，不该为了凑一个上限去动它。
+//
+// 收口只有这一处（服务里评级走它，预览也走它，见 config.go 的 intervals）：预览必须显示
+// **真的会发生的事**，否则一个写着 95 天、真去做却是 94 天的预览比不做预览还糟。
+func clampToCap(card fsrs.Card, reviewedAt time.Time, maxInterval float64) fsrs.Card {
+	if float64(card.ScheduledDays) <= maxInterval {
+		return card
+	}
+	card.ScheduledDays = uint64(maxInterval)
+	// Due 与间隔的关系照库的约定：到期 = 复习那一刻 + N × 24 小时。
+	// 用 24 小时的整数倍而不是 AddDate，是为了与库算出来的时刻**逐位一致** ——
+	// 只有一处口径，比较时才不会差出一个夏令时。
+	card.Due = reviewedAt.Add(time.Duration(card.ScheduledDays) * 24 * time.Hour)
+	return card
 }
 
 // Queue 返回当前的**今日复习队列**：到期日是今天或更早的错题，最该复习的在前。
 //
-// 队列的长度就是「今天还剩多少道」—— 评过的题会把到期推到至少明天（见 newScheduler），
+// 队列的长度就是「今天还剩多少道」—— 评过的题会把到期推到至少明天（见 Config.params），
 // 所以做完一道它就少一道，中途重进本页也不会把刚做过的捞回来。
 //
 // 判定按**本地日**取，取到次日零点为止（endOfToday）。这么定的理由、以及它与「到期其实
@@ -110,12 +140,15 @@ func (s *Service) Grade(questionID int64, rating Rating) (ReviewResult, error) {
 		card = fsrs.NewCard(now) // 新题：从零起算
 	}
 
-	info, err := s.scheduler.Next(card, now, fsrs.Rating(rating))
+	params := s.params()
+	info, err := fsrs.NewFSRS(params).Next(card, now, fsrs.Rating(rating))
 	if err != nil {
 		return ReviewResult{}, fmt.Errorf("复习: FSRS 算不出下一次到期: %w", err)
 	}
+	// 把结果收进上限之内 —— 官方库那个上限是软的（见 clampToCap 里量出来的那两个数）。
+	next := clampToCap(info.Card, now, params.MaximumInterval)
 
-	if err := s.store.save(questionID, fsrs.Rating(rating), info.Card); err != nil {
+	if err := s.store.save(questionID, fsrs.Rating(rating), next); err != nil {
 		return ReviewResult{}, err
 	}
 
@@ -123,9 +156,84 @@ func (s *Service) Grade(questionID int64, rating Rating) (ReviewResult, error) {
 		QuestionID:    questionID,
 		Rating:        rating,
 		ReviewedAt:    now.UTC(),
-		DueAt:         info.Card.Due.UTC(),
-		ScheduledDays: int(info.Card.ScheduledDays),
+		DueAt:         next.Due.UTC(),
+		ScheduledDays: int(next.ScheduledDays),
 	}, nil
+}
+
+// Config 返回当前的复习参数设置（含四档预览）；文件坏了就退回默认值，并把问题带回去。
+//
+// 每次都**重读一遍文件**，不只读缓存：这一页是用户改设置的地方，它显示的必须是他刚存下的
+// 那一份。顺带把缓存也刷新了 —— 排程与界面看到的因此是同一个值。
+func (s *Service) Config() ConfigView {
+	cfg, problem := loadConfigFile(s.cfgPath)
+	s.mu.Lock()
+	s.cfg = cfg
+	s.mu.Unlock()
+	return cfg.view(s.cfgPath, s.now(), problem)
+}
+
+// Preview 按**传进来的这份设置**算一遍视图：不落盘、不动库、也不改缓存。
+//
+// 为什么值得单开一个方法，而不是等 SetConfig 的返回值：这一页唯一要回答的问题是
+// 「这么设之后间隔变多长」，而那个答案要在按下保存**之前**就看得见 —— 否则每试一个日期
+// 都是一次真的写入（还会顺手拉一批到期日回来）。
+//
+// 日期不合法时返回错误，界面那侧静默退回「按已保存那份显示」：用户还在打字的中间，
+// 一个打了一半的日期不该弹一句红字。
+func (s *Service) Preview(c Config) (ConfigView, error) {
+	if err := c.Validate(); err != nil {
+		return ConfigView{}, err
+	}
+	return c.view(s.cfgPath, s.now(), ""), nil
+}
+
+// SaveResult 是保存设置之后带回来的：新的设置（含预览），以及这次顺手动了几行到期日。
+type SaveResult struct {
+	View ConfigView
+	// PulledBack 是「到期日原本排在生效上限之外、这次被拉回来的」题目数。
+	//
+	// 只在有生效上限时才可能非 0。它是界面必须说出来的一件事：用户改了考试日期之后，
+	// 库里那些排到几个月后的题刚刚**被动了**，那不该悄悄发生。
+	PulledBack int
+}
+
+// SetConfig 存下复习参数，并把库里已经排到生效上限之外的到期日拉回来。
+//
+// 拉回来放在这里、而不是每次算调度参数时顺手做，因为那是一个**用户动作**的结果
+// （他填了或者改了考试日期）：要能给他一个「动了几道」的数字，而且不该天天偷偷改库。
+//
+// 顺序是先落盘再动库 —— 反过来的话会留下「库已经被改了，而设置没存下去」的状态，
+// 那个上限下次就没人记得，被拉的题白拉。
+func (s *Service) SetConfig(c Config) (SaveResult, error) {
+	if err := c.Validate(); err != nil {
+		return SaveResult{}, err
+	}
+	if err := c.Save(s.cfgPath); err != nil {
+		return SaveResult{}, err
+	}
+
+	now := s.now()
+	s.mu.Lock()
+	s.cfg = c
+	s.mu.Unlock()
+
+	view := c.view(s.cfgPath, now, "")
+
+	mi, active := c.maxInterval(now)
+	if !active {
+		// 没有生效的上限（没填考试日期、或者考过了）：一行都不动。
+		// 也**不恢复**已经拉近过的到期日 —— 那一步的信息在拉的时候就已经没了。
+		return SaveResult{View: view}, nil
+	}
+
+	n, err := s.store.clampDue(now, int(mi))
+	if err != nil {
+		// 设置已经存下去了，失败的只是「拉回来」这一半。照实报在错的那件事上，
+		// 别让它听起来像「设置没保存」—— 那会让用户以为白改了一次。
+		return SaveResult{View: view}, err
+	}
+	return SaveResult{View: view, PulledBack: n}, nil
 }
 
 // endOfToday 返回 now 所在的那一天的结束，也就是**次日零点**；

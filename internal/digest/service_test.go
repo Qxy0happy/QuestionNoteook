@@ -85,7 +85,7 @@ func newEnv(t *testing.T, at time.Time) *env {
 	cfgPath := filepath.Join(t.TempDir(), "digest.json")
 	return &env{
 		svc:       digest.NewService(lib, cfgPath, digest.WithNow(clk.Now)),
-		rev:       review.NewService(lib, review.WithNow(clk.Now)),
+		rev:       review.NewService(lib, filepath.Join(t.TempDir(), "review.json"), review.WithNow(clk.Now)),
 		lib:       lib,
 		clk:       clk,
 		cfgPath:   cfgPath,
@@ -265,7 +265,7 @@ func TestForecastAgreesWithReviewQueue(t *testing.T) {
 	got := forecast(t, e.svc, 6)
 	for i, d := range got {
 		noon := dayAt(i, 12)
-		rs := review.NewService(e.lib, review.WithNow(func() time.Time { return noon }))
+		rs := review.NewService(e.lib, filepath.Join(t.TempDir(), "review.json"), review.WithNow(func() time.Time { return noon }))
 		items, err := rs.Queue()
 		if err != nil {
 			t.Fatalf("第 %d 天的 Queue: %v", i, err)

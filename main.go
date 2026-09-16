@@ -62,7 +62,10 @@ func main() {
 	// review 与 digest 的「今天」都从 now.Location() 推出来。**安卓上 Go 的 time.Local 是 UTC**
 	// （拿不到系统时区），所以这两处必须用 devtz.Now —— 否则「今日到期」按 UTC 日切、
 	// 每日汇总的钟点也会差一个偏移。见 internal/devtz 的包注释。
-	reviewService := review.NewService(db, review.WithNow(devtz.Now))
+	// 复习参数的设置（间隔模糊、考试日期）也是库外 JSON，与 vlm.json / digest.json 并列。
+	// 文件不在或读坏了都不拦着服务起来 —— 那两种情况都退回默认设置，问题显示在设置页
+	// （见 internal/review/config.go 的 loadConfigFile：这里的取向与 digest 相反，是有意的）。
+	reviewService := review.NewService(db, filepath.Join(root, "review.json"), review.WithNow(devtz.Now))
 
 	// VLM 的端点与凭据不进库：它们是配置，不是错题的数据模型（ADR-0004 已经把「库外的东西」
 	// 这个模式立好了）。路径与 library.db、cards/ 并列在同一个应用私有目录下。

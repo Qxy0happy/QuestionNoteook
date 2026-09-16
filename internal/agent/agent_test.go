@@ -87,7 +87,7 @@ func newHarness(t *testing.T, opts ...agent.Option) *harness {
 
 	clk := &clock{t: base}
 	tagSvc := tags.NewService(lib)
-	reviewSvc := review.NewService(lib, review.WithNow(clk.Now))
+	reviewSvc := review.NewService(lib, filepath.Join(t.TempDir(), "review.json"), review.WithNow(clk.Now))
 
 	cfgPath := filepath.Join(root, "vlm.json")
 	if err := testConfig().Save(cfgPath); err != nil {
