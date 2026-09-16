@@ -23,8 +23,28 @@
 
   let { answerFor = null, onAnswerAttached }: Props = $props();
 
-  // 选框初值：居中、占七成。留出的那一圈不只是好看 —— 看得见框外，才判断得出框歪没歪。
-  const DEFAULT_BOX: Box = { x: 0.15, y: 0.15, w: 0.7, h: 0.7 };
+  // 选框初值的形状：屏幕上与取景框（HUD）一致 —— 贴满屏宽、横向 2:1。
+  // 用户 2026-09-16 定的：「默认框选也选择和 HUD 相近甚至相同」。
+  //
+  // 这里必须换算，不能直接写归一化的数：HUD 画在**屏幕空间**，而选框归一化在**帧**上，
+  // 屏幕上 2:1 的框落到帧坐标里，高是 w·ar/2（ar = 帧的像素宽高比）。
+  // 所以真正那份得等帧到手才能算 —— 模块加载时还不知道相机会给什么比例。
+  //
+  // 四角各留一条窄边（不是"居中占七成"那个老值）：留白只为让角柄落得下手指，
+  // 屏幕边上那半个角柄是够不着的。
+  const HUD_ASPECT = 2; // 必须与 .reticle 的 aspect-ratio 一致
+  const HUD_INSET = 0.04;
+
+  function defaultBox(frameW: number, frameH: number): Box {
+    const w = 1 - 2 * HUD_INSET;
+    // 夹一下：ar 特别大的流会让高超过 1，那时框铺满帧高、不再是 2:1，但至少是合法的。
+    const h = Math.min(1, (w * (frameW / frameH)) / HUD_ASPECT);
+    return { x: HUD_INSET, y: (1 - h) / 2, w, h };
+  }
+
+  // 帧还没有时的名义值（那时选框根本还没显示，没人看得见它）。
+  // 真正那一份在快门那一步按帧的真实比例现算。
+  const DEFAULT_BOX: Box = defaultBox(4, 3);
 
   let root = $state<HTMLElement | null>(null);
   let video = $state<HTMLVideoElement | null>(null);
@@ -172,7 +192,8 @@
     // 源矩形与目标同尺寸 —— 逐像素搬运，不重采样。
     ctx.drawImage(el, 0, 0, vw, vh, 0, 0, vw, vh);
 
-    crop = { ...DEFAULT_BOX };
+    // 选框初值按**这一帧**的真实比例算，于是它在屏幕上与取景框长得一样。
+    crop = defaultBox(vw, vh);
     cardUrl = null;
     // 新的一张帧：上一次采集留下的那几个结果与它无关了。
     savedHash = null;
@@ -400,7 +421,8 @@
     translate: -50% -50%;
     /* 长边贴满屏宽，高取屏宽的一半 —— 横向 2:1。
        它是**对位参考**，不是裁切范围的预览：拍下来的是整帧，裁剪是下一步选框的事，
-       所以它不受相机流比例影响，横屏竖屏都是一个样子（用户 2026-09-16 定的）。 */
+       所以它不受相机流比例影响，横屏竖屏都是一个样子（用户 2026-09-16 定的）。
+       这个 2:1 与脚本里的 HUD_ASPECT 是一件事的两半（那边用它反推选框初值），改要一起改。 */
     width: 100%;
     aspect-ratio: 2 / 1;
     /* 描边算进这 100% 里，于是左右两条竖边正好落在屏幕边缘上，不会被切掉半个。 */
