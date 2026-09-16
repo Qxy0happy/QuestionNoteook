@@ -23,6 +23,9 @@
   import { RATINGS, ratingLabel } from './ratings';
   // 放大（捏合 + 拖动）与题库详情页共用同一份手势实现。
   import { pinchZoom, ZOOMED_AT } from './zoom';
+  // 增强（去阴影）的状态与那条链也在**同一份**模块里 —— 两页各抄一遍的话，
+  // 「算多大一张、blob 什么时候放掉、放大后换一版」这几条规矩就会有两处会走样。
+  import { EnhancedShots } from './enhanced.svelte';
 
   let root = $state<HTMLElement | null>(null);
 
@@ -40,6 +43,17 @@
   // 否则放大的那半张会盖到另一张图上（或者底部那排评级按钮上）。
   let qZoomed = $state(false);
   let aZoomed = $state(false);
+
+  // 增强（去阴影）。**开关在这里是整段复习一直开着的**（不像题库详情那样每题重置）：
+  // 复习是一口气做十几道，每题都要重新按一下会很烦。图片本身仍然按题重算。
+  const shots = new EnhancedShots();
+  // 一块图在屏幕上占的 CSS 像素尺寸，与两个 <img>（读原图尺寸用）。
+  let qBoxW = $state(0);
+  let qBoxH = $state(0);
+  let aBoxW = $state(0);
+  let aBoxH = $state(0);
+  let qImgEl = $state<HTMLImageElement | null>(null);
+  let aImgEl = $state<HTMLImageElement | null>(null);
 
   // 今天建议再做几道（由 VLM 看着「还剩多少道」与「最近表现」给）。null = 没有推荐 ——
   // 没配 VLM、断网、模型答得不能用，或者今天压根没到期题，这几种情况在这一页上是同一件事：
@@ -126,6 +140,8 @@
       tags = [];
       questionUrl = null;
       questionError = '';
+      // 两张图都没了：增强过的那两份也放掉（开关**不关**，见 shots 那段注释）。
+      refreshShots();
       return;
     }
 
@@ -137,6 +153,7 @@
     tags = [];
     questionUrl = null;
     questionError = '';
+    refreshShots();
     if (next) void loadQuestion(next);
   }
 
@@ -188,12 +205,34 @@
     }
   }
 
+  // ── 增强（去阴影）──
+  //
+  // 与题库详情页共用同一个模块（enhanced.svelte.ts），这里只做接线：告诉它这一槽现在
+  // 显示的是哪张图、按哪块尺寸算。什么时候重算、blob 什么时候放掉都在模块里。
+  function refreshShots() {
+    void shots.refresh({
+      q: questionUrl ? { url: questionUrl, boxW: qBoxW, boxH: qBoxH, el: qImgEl } : null,
+      a: answerUrl ? { url: answerUrl, boxW: aBoxW, boxH: aBoxH, el: aImgEl } : null,
+    });
+  }
+
+  function toggleEnhance() {
+    shots.toggle();
+    void refreshShots();
+  }
+
+  function upgradeShot(slot: 'q' | 'a', zoomed: boolean) {
+    if (zoomed && shots.upgrade(slot)) void refreshShots();
+  }
+
   async function loadQuestion(item: QueueItem) {
     const url = await fetchImage(item.Question.QuestionHash);
     // 取图是异步的：这中间用户可能已经翻到下一道了，别把旧图贴上去。
     if (current?.Question.ID !== item.Question.ID) return;
     questionUrl = url;
     questionError = url ? '' : '这道题的题图不在，可能已被清理';
+    // 增强开着的话，新的这张按**这一道题**重算一版（开关本身不重置，见上面那段注释）。
+    void refreshShots();
   }
 
   async function loadAnswer(item: QueueItem) {
@@ -203,6 +242,7 @@
     if (current?.Question.ID !== item.Question.ID) return;
     answerUrl = url;
     answerError = url ? '' : '这道题的答案图不在，可能已被清理';
+    void refreshShots();
   }
 
   async function loadTags(id: number) {
@@ -269,6 +309,10 @@
   {#if listError}
     <p class="banner">{listError}</p>
   {/if}
+  {#if shots.error}
+    <!-- 增强算不出来（画布拿不到、编码失败）：照旧显示原图，但别让按钮亮着却什么都没变。 -->
+    <p class="banner">{shots.error}</p>
+  {/if}
 
   <!-- 今天建议再做几道（story 25）。它是**一道闸**，不是新的到期时间：采纳只是让这一页
        在 cap 道之后停下来，库里的到期时刻一个都没动，不采纳则等于这一条不存在。 -->
@@ -307,13 +351,18 @@
       <figure
         class="shot"
         class:zoomed={qZoomed}
+        bind:clientWidth={qBoxW}
+        bind:clientHeight={qBoxH}
         use:pinchZoom={{
           resetKey: current?.Question.ID,
-          onChange: (st) => (qZoomed = st.scale > ZOOMED_AT),
+          onChange: (st) => {
+            qZoomed = st.scale > ZOOMED_AT;
+            upgradeShot('q', qZoomed);
+          },
         }}
       >
         {#if questionUrl}
-          <img src={questionUrl} alt="题图" />
+          <img bind:this={qImgEl} src={shots.enabled && shots.q ? shots.q : questionUrl} alt="题图" />
         {:else if questionError}
           <figcaption class="hint error">{questionError}</figcaption>
         {:else}
@@ -327,10 +376,17 @@
         <figure
           class="shot answer"
           class:zoomed={aZoomed}
-          use:pinchZoom={{ onChange: (st) => (aZoomed = st.scale > ZOOMED_AT) }}
+          bind:clientWidth={aBoxW}
+          bind:clientHeight={aBoxH}
+          use:pinchZoom={{
+            onChange: (st) => {
+              aZoomed = st.scale > ZOOMED_AT;
+              upgradeShot('a', aZoomed);
+            },
+          }}
         >
           {#if answerUrl}
-            <img src={answerUrl} alt="答案图" />
+            <img bind:this={aImgEl} src={shots.enabled && shots.a ? shots.a : answerUrl} alt="答案图" />
           {:else if answerError}
             <figcaption class="hint error">{answerError}</figcaption>
           {:else}
@@ -352,6 +408,25 @@
       <!-- 缺答案图要在自评**之前**标出来（story 10）：评完才发现没答案可对，这一遍就白做了。 -->
       <div class="meta">
         <AnswerBadge q={current.Question} />
+        <!-- 增强（去阴影）与题库详情页那一个同一份实现。区别只有一处：它在这里是
+             **整段复习一直开着**的（题库详情每题重置）—— 复习是一口气做十几道，
+             每题都要重新按一下很烦；图本身仍然按题重算。 -->
+        <button
+          class="rec-btn ghost"
+          class:on={shots.enabled}
+          onclick={toggleEnhance}
+          disabled={!questionUrl}
+        >
+          {shots.enabled ? '取消增强' : '增强'}
+        </button>
+        {#if shots.enabled && shots.ms > 0}
+          <!-- 毫秒数摆出来：那个数只有真机能答（尤其 PNG 编码那一步），
+               摆着就不必改代码、不必开控制台。整段在 title 里，纯算法那一趟也在。 -->
+          <span
+            class="ms"
+            title={`点下去到能显示花了 ${shots.ms.toFixed(1)}ms，其中去阴影那一趟 ${shots.algoMs.toFixed(1)}ms`}
+          >{shots.ms.toFixed(1)}ms</span>
+        {/if}
       </div>
 
       {#if result}
@@ -452,6 +527,19 @@
     border-color: rgba(244, 246, 251, 0.24);
     background: transparent;
     color: rgba(244, 246, 251, 0.7);
+  }
+  /* 增强开着（与题库详情页那个 .ghost.on 同一个意思）：不改变形状，只换颜色。 */
+  .rec-btn.on {
+    border-color: rgba(130, 200, 255, 0.6);
+    background: rgba(130, 200, 255, 0.14);
+    color: #9fd4ff;
+  }
+  /* 这一趟量到的毫秒数（题库详情页也是这么摆的）。 */
+  .ms {
+    flex: none;
+    font-size: 0.8rem;
+    font-variant-numeric: tabular-nums;
+    color: rgba(244, 246, 251, 0.45);
   }
 
   .stage {

@@ -5,7 +5,6 @@
   // 排序、落库、取图、筛都在 Go 侧，这里只做取数与呈现 —— spec 说前端是薄视图、不做自动化测试，
   // 所以能往前端放的逻辑就别放。唯一留在前端的是「这些 id 交给谁筛」这类接线。
 
-  import { tick } from 'svelte';
   import * as Library from '../bindings/questionbook/internal/library/service';
   import type { Question } from '../bindings/questionbook/internal/library/models';
   import * as Tags from '../bindings/questionbook/internal/tags/service';
@@ -18,10 +17,11 @@
   import Discussion from './Discussion.svelte';
   // 「有没有答案图」的判断只写在一处（answer.ts），别在这儿再写一遍 q.AnswerHash !== ''。
   import { hasAnswer } from './answer';
-  // 去阴影的算法单独一个纯函数模块（enhance.ts）：它不碰 canvas、只吃一块 RGBA 像素，
-  // 所以能脱离浏览器单独量 —— 见下面 refreshEnhanced 上那段注释。
-  import { enhanceInPlace } from './enhance';
-  // 放大（捏合 + 拖动）也是单独一个模块（zoom.ts），题库与复习两页共用同一份手势。
+  // 去阴影的算法是纯函数模块（enhance.ts：不碰 canvas、只吃一块 RGBA 像素，能脱离浏览器
+  // 单独量）；「一张图变成一个看法」那条链（算多大、何时重算、blob 何时放掉）整块在
+  // enhanced.svelte.ts 里 —— 题库与复习两页共用同一份。
+  import { EnhancedShots } from './enhanced.svelte';
+  // 放大（捏合 + 拖动）也是单独一个模块（zoom.ts），两页共用同一份手势。
   import { pinchZoom, ZOOMED_AT } from './zoom';
 
   // 三页是同时挂载的，切到这一页才值得拉一次数据。
@@ -62,17 +62,9 @@
   // 而这条链上的解码本来就不必由 Go 做 —— QuestionImage 回的是图片原样的字节。
   // 这里图片已经是 data URL，解码由 WebView 原生做，我们只做那一趟乘法。
   //
-  // 与「看答案图」一样按题重置：原图是基准，增强是这一次临时打开的看法。
-  let enhance = $state(false);
-  // 增强后的题图 / 答案图。null = 还没算好，这时 <img> 显示原图（不闪白）。
-  let qShot = $state<string | null>(null);
-  let aShot = $state<string | null>(null);
-  // 这一趟量到的毫秒数，直接摆在按钮旁边，让那一次真机测量不必改代码、不必开控制台。
-  // 两个数：enhanceMs 是「点下去到能显示」的整段（用户问的就是这个），
-  // enhanceAlgoMs 是其中纯算法那一趟（那个数是设备无关的，见票据 17 的汇报）。
-  let enhanceMs = $state(0);
-  let enhanceAlgoMs = $state(0);
-  let enhanceError = $state('');
+  // 状态与那条链（算多大一张、什么时候重算、blob 什么时候放掉）整块在 enhanced.svelte.ts 里，
+  // 复习页用的是**同一份** —— 那些规矩抄一份就是两处会走样，而且走样了不会报错。
+  const shots = new EnhancedShots();
 
   // ── 放大（双指捏合 / 放大后单指拖动）──
   //
@@ -80,30 +72,18 @@
   // 放大时裁掉溢出，以及把增强过的那一版换成按**原图**算的。
   let qZoomed = $state(false);
   let aZoomed = $state(false);
-  // 「这一版增强图是按原图算的」。按**显示尺寸**算的那版只有屏幕那么大（见 capFor），
-  // 放大两三倍看到的就是插值的糊，所以要换一版；换过就不降级（缩回去看只会更清楚）。
-  let qShotFull = $state(false);
-  let aShotFull = $state(false);
-  // 读原图尺寸用的（那一版按 naturalWidth/Height 算）。没加载出来时是 null。
+  // 读原图尺寸用的（换那一版时要按 naturalWidth/Height 算）。没加载出来时是 null。
   let qImgEl = $state<HTMLImageElement | null>(null);
   let aImgEl = $state<HTMLImageElement | null>(null);
 
   // 舞台的 CSS 像素尺寸。bind:clientWidth/Height 自带 ResizeObserver，转屏、拖窗口
-  // 都会跟着更新 —— 但**只在开关拨动的那一刻读一次**（见 capFor），不做 resize 重算：
+  // 都会跟着更新 —— 但**只在开关拨动的那一刻读一次**（见 enhanced.svelte.ts 的 capFor），不做 resize 重算：
   // 拖一次窗口会连着触发几十下，每下都重算一遍整张图是不划算的。尺寸变了不重算也不出错，
   // 只是那一刻显示的图还是按旧尺寸算的（可能略软），再拨一次开关就回到最新尺寸。
   let stageW = $state(0);
   let stageH = $state(0);
   let aStageW = $state(0);
   let aStageH = $state(0);
-
-  // 画布像素总量的兜底闸。正常路径由舞台尺寸封顶（手机上一千出头宽，几十万像素），
-  // 这条只防「舞台报了个很大的尺寸」这种边角情况 —— 画布与光照缓冲都是按像素走的。
-  const MAX_PIXELS = 4_000_000;
-
-  // 每次重算换一个号；异步回来的结果对不上号就丢掉。用户可能在这中间关了开关、
-  // 换了题、或者又拨了一下 —— 别把上一张图贴到这一张上（取图那条路径也是这个道理）。
-  let shotToken = 0;
 
   // ── 标签 ──
   // 词表是平的（父由 ParentID 指出），怎么画成三层树是 TagFilter 的事。
@@ -307,19 +287,15 @@
     answerUrl = null;
     answerError = '';
     // 增强也一样按题重置。原图是基准，增强是这一次临时打开的看法；
-    // 同时把上一道题算出来的那两张放掉（refreshEnhanced 在关着的时候只干这件事）。
-    enhance = false;
-    enhanceMs = 0;
-    enhanceAlgoMs = 0;
-    enhanceError = '';
+    // 增强按题重置（原图是基准，增强是这一次临时打开的看法），同时把上一道题算出来的
+    // 那两张放掉 —— resetForNewQuestion 这两件事一起做。
+    shots.resetForNewQuestion();
     // 放大也一样按题重置：换一道题就该从「铺满看全」开始（transform 归位那一步由 action 的
     // resetKey 负责，这里只管我们自己记着的两个标志）。
     qZoomed = false;
     aZoomed = false;
-    qShotFull = false;
-    aShotFull = false;
     void loadTags(q.ID);
-    void refreshEnhanced();
+    void refreshShots();
     openedUrl = cards.get(q.QuestionHash) ?? null;
     if (openedUrl) return;
 
@@ -384,173 +360,36 @@
     } finally {
       // 每一条出路都重算一次：增强开着的时候，摊开的答案图也该是增强版；
       // 收起来的时候则要把那一份放掉（它不在 cards 里，是这次临时算的）。
-      void refreshEnhanced();
+      void refreshShots();
     }
   }
 
   // ── 增强（去阴影）──
-
-  // 目标画布尺寸。上限是「这张图在屏幕上真正占的设备像素」：手机详情页的舞台大约
-  // 350 CSS px 宽、DPR 3，也就是一千出头的设备像素 —— 而题图原始有 2903 宽，
-  // 按原图算等于把四分之三的像素算完再丢掉，屏幕上一点看不出差别。
-  // 舞台还没量出来（首帧为 0）就退回原图尺寸：宁可多算，也别缩成一张 1px 的图。
-  function capFor(nw: number, nh: number, boxW: number, boxH: number) {
-    const dpr = window.devicePixelRatio || 1;
-    const capW = boxW > 0 ? boxW * dpr : nw;
-    const capH = boxH > 0 ? boxH * dpr : nh;
-    const scale = Math.min(1, capW / nw, capH / nh, Math.sqrt(MAX_PIXELS / (nw * nh)));
-    return { w: Math.max(1, Math.round(nw * scale)), h: Math.max(1, Math.round(nh * scale)) };
-  }
-
-  // 这一版该按哪个尺寸算：`full` 为真就按**原图**算（用户放大过，屏幕那么大的一版不够看了），
-  // 否则按显示的设备像素算（快，且屏幕上看不出差别）。
   //
-  // 注意这里给的是「框」而不是「尺寸」：capFor 会把这个框乘上 DPR 再与原图比，所以传原图尺寸
-  // 进去等于要 1:1 —— 上限仍然由 MAX_PIXELS 兜着（那个是防超大图的，与这里无关）。
-  function boxFor(full: boolean, el: HTMLImageElement | null, w: number, h: number): [number, number] {
-    if (full && el && el.naturalWidth > 0) return [el.naturalWidth, el.naturalHeight];
-    return [w, h];
-  }
+  // 状态与那条链（算多大一张、什么时候重算、blob 什么时候放掉、放大之后换一版按原图算）
+  // 整块在 enhanced.svelte.ts 里，复习页用的是**同一份**。这里只做接线：告诉它这一槽
+  // 现在显示的是哪张图、按哪块尺寸算。
 
-  // 放大过头之后把增强图换成按原图算的那一版。
-  //
-  // 为什么非换不可：按显示尺寸算的那版**只有屏幕那么大**（这是票据 17 里量出来的省时间做法），
-  // 放大两三倍看到的就是插值的糊 —— 而那正是用户放大要避开的东西。
-  // 每个槽位只换一次（换过就不再降级：缩回去看只会更清楚，也省一次重算）。
-  function upgradeShot(slot: 'q' | 'a', zoomed: boolean) {
-    if (!zoomed) return;
-    if (slot === 'q' ? qShotFull : aShotFull) return;
-    if (slot === 'q') qShotFull = true;
-    else aShotFull = true;
-    void refreshEnhanced();
-  }
-
-  // 把一张图算成增强版，返回能直接塞进 <img> 的 blob URL 与这一趟的毫秒数。
-  //
-  // 三步：原生解码（Image.decode）→ 缩到目标尺寸的画布（drawImage，浏览器做的，
-  // 比 JS 快得多）→ 交给 enhance.ts 改像素 → 编码回 PNG。
-  //
-  // 最后那个 PNG 编码是**这条链上唯一躲不掉又没法在 Node 里量的一步**：toBlob 在
-  // Blink 上走后台线程，主线程不会被它卡住，但手机上到底多少毫秒只能真机测。
-  // 编码本身不能省 —— 要把一块像素交给 <img> 显示，只有 data URL / blob URL 两条路，
-  // 两条都得先编码。（用 canvas 元素直接当显示层能省掉它，但那会让「关掉回到原图」
-  // 变成「再画一遍原图」，不再是与原图逐像素一致。）
-  async function enhanceForDisplay(
-    src: string,
-    boxW: number,
-    boxH: number,
-  ): Promise<{ url: string; ms: number; algoMs: number }> {
-    // 从「点下去」到「能显示」的整段，与里面的算法那一趟分开计。用户问的是
-    // 「100ms 内做得到吗」，那问的是整段；而这个数会跟着设备变，只能真机上读。
-    const t0 = performance.now();
-    const im = new Image();
-    im.src = src;
-    // decode() 等的是「解码真的完成」。src 是刚取回来的 data URL，浏览器内存缓存里
-    // 通常已经有这一份（题图那张 <img> 刚显示过），所以这一步多数时候是白拿的。
-    await im.decode();
-
-    const { w, h } = capFor(im.naturalWidth, im.naturalHeight, boxW, boxH);
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    // willReadFrequently：下面就是一次 getImageData + 一次 putImageData。
-    // 让画布落在 CPU 侧，省掉 GPU 回读那一趟停顿（一次性的读写不值得走 GPU）。
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    if (!ctx) throw new Error('拿不到画布上下文');
-    ctx.drawImage(im, 0, 0, w, h);
-
-    const pixels = ctx.getImageData(0, 0, w, h);
-    const t1 = performance.now();
-    enhanceInPlace(pixels);
-    const algoMs = performance.now() - t1;
-    ctx.putImageData(pixels, 0, 0);
-
-    const url = await new Promise<string>((resolve, reject) => {
-      canvas.toBlob((b) => (b ? resolve(URL.createObjectURL(b)) : reject(new Error('增强后的图编码失败'))), 'image/png');
+  // 按当前状态把两张图重算一遍。触发点是：拨开关、开一道题、摊开答案图、放大换档。
+  function refreshShots() {
+    void shots.refresh({
+      q: openedUrl ? { url: openedUrl, boxW: stageW, boxH: stageH, el: qImgEl } : null,
+      // 答案图只在它正摊开着的时候算：没显示的东西没必要花这份时间（它可能是半张纸的像素）。
+      a:
+        showAnswer && answerUrl
+          ? { url: answerUrl, boxW: aStageW || stageW, boxH: aStageH || stageH, el: aImgEl }
+          : null,
     });
-    return { url, ms: performance.now() - t0, algoMs };
   }
 
-  // 换掉一个槽位里的 blob URL，并**在 DOM 换过 src 之后**放掉旧的那张。
-  // 顺序不能反：提前 revoke，当前那张 <img> 指着的资源会被抽掉。
-  // 不放也不行 —— 一张增强图是几百 KB 的 PNG，开关来回拨几十次就是几十 MB。
-  async function swapShot(slot: 'q' | 'a', url: string | null) {
-    const old = slot === 'q' ? qShot : aShot;
-    if (old === url) return;
-    if (slot === 'q') qShot = url;
-    else aShot = url;
-    await tick();
-    if (old) URL.revokeObjectURL(old);
-  }
-
-  // 按当前状态把两张图重算一遍。触发点是：拨开关、开一道题、摊开答案图。
-  async function refreshEnhanced() {
-    const token = ++shotToken;
-
-    // 关着的时候什么都不做，只是把增强过的那两张放掉 —— 显示立刻回到原图。
-    // 这一支必须排在 opened 判空**之前**：close() 里 opened 已经先置空了，
-    // 但那两张仍然得放掉（它们只属于刚关掉的那一次查看）。
-    if (!enhance) {
-      void swapShot('q', null);
-      void swapShot('a', null);
-      // 放掉的同时把「按原图算的那一版」这个档位也退回默认：下一回打开是全新的一个看法。
-      qShotFull = false;
-      aShotFull = false;
-      return;
-    }
-    if (!opened) return;
-
-    if (openedUrl) {
-      try {
-        const r = await enhanceForDisplay(openedUrl, ...boxFor(qShotFull, qImgEl, stageW, stageH));
-        if (token !== shotToken) {
-          URL.revokeObjectURL(r.url); // 这次的结果已经过时，别留在内存里
-          return;
-        }
-        enhanceMs = r.ms;
-        enhanceAlgoMs = r.algoMs;
-        enhanceError = '';
-        await swapShot('q', r.url);
-      } catch (err) {
-        if (token === shotToken) {
-          // 算不出来就照旧显示原图，把话说出来 —— 别让按钮亮着却什么都没变。
-          enhanceError = errorMessage(err);
-          void swapShot('q', null);
-        }
-      }
-    }
-
-    // 答案图只在它正摊开着的时候算：没显示的东西没必要花这份时间（它可能是半张纸的像素）。
-    if (showAnswer && answerUrl) {
-      try {
-        const r = await enhanceForDisplay(
-          answerUrl,
-          ...boxFor(aShotFull, aImgEl, aStageW || stageW, aStageH || stageH),
-        );
-        if (token !== shotToken) {
-          URL.revokeObjectURL(r.url);
-          return;
-        }
-        await swapShot('a', r.url);
-      } catch (err) {
-        if (token === shotToken) {
-          enhanceError = errorMessage(err);
-          void swapShot('a', null);
-        }
-      }
-    } else {
-      void swapShot('a', null);
-    }
-  }
-
+  // 拨开关 / 放大换档：动作都只是「改状态 + 重算一遍」，判断（档位、放掉旧图）都在模块里。
   function toggleEnhance() {
-    enhance = !enhance;
-    enhanceError = '';
-    if (!enhance) {
-      enhanceMs = 0;
-      enhanceAlgoMs = 0;
-    }
-    void refreshEnhanced();
+    shots.toggle();
+    void refreshShots();
+  }
+
+  function upgradeShot(slot: 'q' | 'a', zoomed: boolean) {
+    if (zoomed && shots.upgrade(slot)) void refreshShots();
   }
 
   // ── 标签：取词表、筛列表、给一道题打标签 ──
@@ -704,14 +543,9 @@
     answerError = '';
     tagError = '';
     // 增强那两张不在 cards 里（它们只属于这一次查看），走之前得放掉，
-    // 否则每开一道题就多留两张 PNG 在内存里。
-    enhance = false;
-    enhanceMs = 0;
-    enhanceAlgoMs = 0;
-    enhanceError = '';
-    qShotFull = false;
-    aShotFull = false;
-    void refreshEnhanced();
+    // 否则每开一道题就多留两张 PNG 在内存里。reset 同时把开关关掉、毫秒数与档位清空。
+    shots.resetForNewQuestion();
+    void refreshShots();
     closeTagging();
   }
 
@@ -792,17 +626,17 @@
            它俩是同一类动作：都只改「现在看到什么」，不写库、不换页。
            「补拍答案图」会切到取景页，「标签 / 识别标签」会写库，那些是另一类。
            默认关：原图是基准，只有阴影糊住字的时候才临时拨开看一眼。 -->
-      <button class="ghost" class:on={enhance} onclick={toggleEnhance} disabled={!openedUrl}>
-        {enhance ? '取消增强' : '增强'}
+      <button class="ghost" class:on={shots.enabled} onclick={toggleEnhance} disabled={!openedUrl}>
+        {shots.enabled ? '取消增强' : '增强'}
       </button>
-      {#if enhance && enhanceMs > 0}
+      {#if shots.enabled && shots.ms > 0}
         <!-- 这一趟量到的毫秒数直接摆出来 —— 用户问的就是「100ms 内做得到吗」，
              而这个数只有真机能答，摆出来那次测量就不必改代码、不必开控制台。
              显示的是整段（解码 → 画布 → 去阴影 → 编码回 PNG），纯算法那一趟在 title 里。 -->
         <span
           class="ms"
-          title={`点下去到能显示花了 ${enhanceMs.toFixed(1)}ms，其中去阴影那一趟 ${enhanceAlgoMs.toFixed(1)}ms`}
-        >{enhanceMs.toFixed(1)}ms</span>
+          title={`点下去到能显示花了 ${shots.ms.toFixed(1)}ms，其中去阴影那一趟 ${shots.algoMs.toFixed(1)}ms`}
+        >{shots.ms.toFixed(1)}ms</span>
       {/if}
       <button class="ghost" class:on={openedTagIDs.length > 0} onclick={toggleTags}>
         标签{openedTagIDs.length > 0 ? ` ${openedTagIDs.length}` : ''}
@@ -820,12 +654,12 @@
       <p class="banner">{tagError}</p>
     {/if}
 
-    {#if enhanceError}
-      <p class="banner">{enhanceError}</p>
+    {#if shots.error}
+      <p class="banner">{shots.error}</p>
     {/if}
 
     <!-- bind:clientWidth/Height 自带 ResizeObserver，拨开关那一刻读的就是舞台上真实的尺寸。
-         qShot 还没算好（或这一趟失败了）时 src 落回 openedUrl —— 显示的是原图，不是空白。 -->
+         增强那一版还没算好（或这一趟失败了）时 src 落回 openedUrl —— 显示的是原图，不是空白。 -->
     <div
       class="stage"
       class:zoomed={qZoomed}
@@ -840,7 +674,7 @@
       }}
     >
       {#if openedUrl}
-        <img bind:this={qImgEl} src={enhance && qShot ? qShot : openedUrl} alt="题图" />
+        <img bind:this={qImgEl} src={shots.enabled && shots.q ? shots.q : openedUrl} alt="题图" />
       {:else if openedError}
         <p class="hint error">{openedError}</p>
       {:else}
@@ -866,7 +700,7 @@
         }}
       >
         {#if answerUrl}
-          <img bind:this={aImgEl} src={enhance && aShot ? aShot : answerUrl} alt="答案图" />
+          <img bind:this={aImgEl} src={shots.enabled && shots.a ? shots.a : answerUrl} alt="答案图" />
         {:else if answerError}
           <p class="hint error">{answerError}</p>
         {:else}
