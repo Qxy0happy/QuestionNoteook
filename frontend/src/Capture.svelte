@@ -3,7 +3,8 @@
   // 取景框与中心十字是**纯装饰**的对准辅助：不做边缘检测，也不随画面内容变化。
   //
   // 快门之后本页进入「框选」态：底图铺满 + 居中可变边长的矩形选框。
-  // 确认那一刻定稿 —— 裁出的子图交给 Go 侧拉正、落盘、入库，帧随即丢掉（ADR-0007）。
+  // 框选确认之后**不退出去、也不写库**，而是进「保存界面」看一眼裁出来的成品 ——
+  // 歪了能退回重框，按了保存才交给 Go 侧拉正、落盘、入库，然后自动回到取景（ADR-0007）。
 
   import * as capture from '../bindings/questionbook/internal/capture/service.js';
   import * as library from '../bindings/questionbook/internal/library/service.js';
@@ -63,14 +64,9 @@
   let stageH = $state(0);
   // 选框，归一化到帧上（定义见 CropBox 的 Box）。
   let crop = $state<Box>({ ...DEFAULT_BOX });
-  // 入库后按 hash 取回的成品图（题图或答案图，PNG data URL）。
-  let cardUrl = $state<string | null>(null);
-  // 已经采集成功、只差把成品取回来显示的题图 hash（null = 这一趟还没采）。
-  // 采集一次成功，题就在库里了，所以重试只能重取图 —— 再采一次会多出一道错题。
-  let savedHash: string | null = null;
-  // 补拍答案图那一条路上已经写进库的那道错题（null = 还没补）。
-  // 用途与 savedHash 相同：成了之后重试只能重取图，别再写一遍。
-  let attached = $state<Question | null>(null);
+  // 保存界面上的那张成品。非 null 就表示停在这一屏 —— 裁切结果与它的显示副本放在
+  // **同一个**状态里，免得「该显示哪一屏」和「该保存哪一张」有机会对不上。
+  let pending = $state<{ canvas: HTMLCanvasElement; url: string } | null>(null);
   // 上一次的补拍目标，用来发现「目标换了」这件事。它不参与渲染，所以不是 $state。
   let lastAnswerFor: number | null = null;
   // 交给 Go 的那一趟还没回来。期间锁住三个按钮，免得重复提交。
@@ -196,10 +192,8 @@
 
     // 选框初值按**这一帧**的真实比例算，于是它在屏幕上与取景框长得一样。
     crop = defaultBox(vw, vh);
-    cardUrl = null;
-    // 新的一张帧：上一次采集留下的那几个结果与它无关了。
-    savedHash = null;
-    attached = null;
+    // 新的一张帧：上一轮那张待保存的成品与它无关了。
+    pending = null;
     frame = canvas;
     frameUrl = canvas.toDataURL('image/jpeg', 0.92);
   }
@@ -232,79 +226,81 @@
     crop = { x: 1 - (crop.y + crop.h), y: crop.x, w: crop.h, h: crop.w };
   }
 
-  // 确认框选。到这一步就定稿：帧被丢掉，框歪了只能重拍。
-  async function confirm() {
+  // 框选按「确认」：**只裁不存** —— 把选框在无损帧上裁下来，交给保存界面看一眼。
+  //
+  // 拆成两步是为了让「框歪了」能在**写库之前**发现。以前确认即定稿：帧一丢，选框就无从改起，
+  // 歪了只能重拍，而重拍会为同一张题图再建一道错题。
+  function toPreview() {
     const src = frame;
     if (!src || busy) return;
+
+    // 归一化 → 像素，夹一次边界：四舍五入可能把右边推到帧外一个像素。
+    const px = clamp(Math.round(crop.x * src.width), 0, src.width - 1);
+    const py = clamp(Math.round(crop.y * src.height), 0, src.height - 1);
+    const pw = clamp(Math.round(crop.w * src.width), 1, src.width - px);
+    const ph = clamp(Math.round(crop.h * src.height), 1, src.height - py);
+
+    const cut = document.createElement('canvas');
+    cut.width = pw;
+    cut.height = ph;
+    const ctx = cut.getContext('2d');
+    if (!ctx) return;
+    // 源矩形与目标同尺寸 —— 逐像素搬运，不重采样。
+    ctx.drawImage(src, px, py, pw, ph, 0, 0, pw, ph);
+
+    errorText = '';
+    // 预览用 PNG：与真正交出去的那份**同格式**，免得「看到的」和「存下的」不是一张图。
+    pending = { canvas: cut, url: cut.toDataURL('image/png') };
+  }
+
+  // 保存界面按「重框」：退回框选态。帧与选框都还在，改完再来一次，一个字节都没写过库。
+  function backToCrop() {
+    if (busy) return;
+    pending = null;
+    errorText = '';
+  }
+
+  // 保存界面按「保存」：到这一步才写库。成了自动回取景（可以直接拍下一张）。
+  async function save() {
+    const p = pending;
+    if (!p || busy) return;
     busy = true;
     errorText = '';
 
     try {
-      // 1) 按选框在**无损帧**上裁子图。归一化 → 像素先在同步段里定下来：
-      //    后面 await 会让出线程，那时用户再拖选框也不该改变这一次提交的内容。
-      //    夹一次边界：四舍五入可能把右边推到帧外一个像素。
-      const px = clamp(Math.round(crop.x * src.width), 0, src.width - 1);
-      const py = clamp(Math.round(crop.y * src.height), 0, src.height - 1);
-      const pw = clamp(Math.round(crop.w * src.width), 1, src.width - px);
-      const ph = clamp(Math.round(crop.h * src.height), 1, src.height - py);
-
-      const cut = document.createElement('canvas');
-      cut.width = pw;
-      cut.height = ph;
-      const ctx = cut.getContext('2d');
-      if (!ctx) throw new Error('裁图：拿不到 2d 上下文');
-      // 源矩形与目标同尺寸 —— 逐像素搬运，不重采样。
-      ctx.drawImage(src, px, py, pw, ph, 0, 0, pw, ph);
-
       // PNG 而不是 JPEG：题图存的是原始像素，过一次有损编码就再也回不来了
       // （spec 的 Out of Scope：不做不可逆增强）。
-      const base64 = cut.toDataURL('image/png').split(',')[1];
-      if (!base64) throw new Error('裁图：PNG 编码失败');
+      const base64 = p.canvas.toDataURL('image/png').split(',')[1];
+      if (!base64) throw new Error('保存：PNG 编码失败');
 
-      // 2) 四个角点是选框在**裁后那张图**里的位置，顺序固定 左上 → 右上 → 右下 → 左下。
+      // 四个角点是选框在**裁后那张图**里的位置，顺序固定 左上 → 右上 → 右下 → 左下。
       //
-      //    选框是轴对齐的矩形，所以这一步今天在几何上是一次**恒等变换** —— 看着像白跑
-      //    一趟，但**不能省**：它是 Go 侧唯一被 fixture 测试覆盖的入口，也是将来改成
-      //    四角可独立拖时前端唯一要动的地方（那时把四个值换成各自的拖动结果即可，
-      //    Go 侧一行都不用改）。
+      // 选框是轴对齐的矩形，所以这一步今天在几何上是一次**恒等变换** —— 看着像白跑
+      // 一趟，但**不能省**：它是 Go 侧唯一被 fixture 测试覆盖的入口，也是将来改成
+      // 四角可独立拖时前端唯一要动的地方（那时把四个值换成各自的拖动结果即可，
+      // Go 侧一行都不用改）。
       const quad: Quad = [
         { X: 0, Y: 0 }, // 左上
-        { X: pw, Y: 0 }, // 右上
-        { X: pw, Y: ph }, // 右下
-        { X: 0, Y: ph }, // 左下
+        { X: p.canvas.width, Y: 0 }, // 右上
+        { X: p.canvas.width, Y: p.canvas.height }, // 右下
+        { X: 0, Y: p.canvas.height }, // 左下
       ];
 
       if (answerFor != null) {
-        // 3a) 补拍答案图：拉正 + 落盘 + 写到这道题的 answer_hash 上，同样是一趟做完。
-        //     采集那侧给的是「新错题」，这里给的是「更新后的那道错题」—— 差别只在落点。
-        //
-        //     它一次成功答案就已经在库里了，所以重试只重取图；真要把这张换掉，
-        //     按下面那两个按钮（重拍 / 完成）走，而不是在这里偷偷再写一遍。
-        const q = attached ?? (await library.AttachAnswer(answerFor, base64, quad));
-        attached = q;
-
-        // 4a) 取回成品答案图给界面看。读图同样归题库。
-        const shown = await library.AnswerImage(q.AnswerHash);
-        cardUrl = `data:image/png;base64,${shown}`;
+        // 补拍答案图：拉正 + 落盘 + 写到这道题的 answer_hash 上，一趟做完。
+        // 采集那侧给的是「新错题」，这里给的是「更新后的那道错题」—— 差别只在落点。
+        const q = await library.AttachAnswer(answerFor, base64, quad);
+        // 先清本页再交出去：extern 那边一收到就会退出补拍态，本页不该还停在一张旧成品上。
+        clearShot();
+        onAnswerAttached?.(q);
       } else {
-        // 3b) 一趟做完：拉正 + 按内容 hash 落盘 + 建错题，回来的是**新错题**本身。
-        //     中间没有第二次 IPC，也就没有「题图落了盘、错题没建出来」的空子。
-        //
-        //     它成功那一刻题就已经在库里了，所以这一趟只允许走一次：重试只能重取图，
-        //     再采一次会为同一张题图**再建一道错题**（dfc337e 修的就是这个）。
-        //     重试时选框已经不起作用了 —— 题是按上一次的框定稿的，想改框只能重拍。
-        const hash = savedHash ?? (await capture.Capture(base64, quad)).QuestionHash;
-        savedHash = hash;
-
-        // 4b) 取回成品题图给界面看。题图的读归题库，采集那边已经没有读路径了。
-        const card = await library.QuestionImage(hash);
-        cardUrl = `data:image/png;base64,${card}`;
-        savedHash = null;
+        // 一趟做完：拉正 + 按内容 hash 落盘 + 建错题，回来的是**新错题**本身。
+        // 中间没有第二次 IPC，也就没有「题图落了盘、错题没建出来」的空子。
+        await capture.Capture(base64, quad);
+        clearShot();
       }
-
-      // 定稿了：帧与它的显示副本一起丢掉。原图不再保留是刻意的（ADR-0007）。
-      frame = null;
-      frameUrl = null;
+      // 保存成功才回取景。失败就留在保存界面（走下面那个 catch）—— 帧与选框都还留着，
+      // 用户不会被莫名弹回取景、也不知道到底存上没存上。
     } catch (err: unknown) {
       errorText = err instanceof Error ? err.message : String(err);
     } finally {
@@ -313,50 +309,41 @@
   }
 
   // 清本页的显示状态，回到取景。
-  // 注意这不是「撤销」：上一张只要采集成功过，它就已经在库里了（取图失败也拦不住），
-  // 这里清的只是本页的显示状态。
+  // 注意这不是「撤销」：上一张只要按过保存，它就已经在库里了，这里清的只是本页的显示状态。
   function clearShot() {
     frame = null;
     frameUrl = null;
-    cardUrl = null;
-    savedHash = null;
-    attached = null;
+    pending = null;
     crop = { ...DEFAULT_BOX };
     errorText = '';
   }
 
-  // 重拍 / 拍下一张。
+  // 框选态按「重拍」：整张帧丢掉重来（与「重框」不同，那只是退回选框）。
   function retake() {
     if (busy) return;
     clearShot();
   }
 
-  // 补拍完收工：把更新后的那道错题交给外面（题库页据此刷新），本页回到取景。
-  // 换下来的旧答案图由 Go 侧回收 —— 重拍过的那些在这里才算真的落地。
-  function finishAnswer() {
-    if (busy) return;
-    const q = attached;
-    clearShot();
-    if (q) onAnswerAttached?.(q);
-  }
+  // 补拍保存之后那道错题由 save() 直接交出去（在那里递，是因为要等 Go 那一趟回来）。
+  // 换下来的旧答案图由 Go 侧回收 —— 补拍过的那些在那儿才算真的落地。
 </script>
 
 <div class="capture" bind:this={root}>
   <video bind:this={video} class="preview" autoplay muted playsinline></video>
 
-  {#if cardUrl}
-    <!-- 成品。原图已经没了，这里能做的只有继续拍下一道（补拍则是收工或重来）。 -->
+  {#if pending}
+    <!-- 保存界面：写库之前的最后一瞥，也是**唯一**能改主意的地方。
+         框歪了、拍糊了，退回去重框，一道错题都不会多出来 —— 以前确认即定稿，
+         重拍会为同一张题图再建一道错题。 -->
     <div class="shot">
-      <img class="card" src={cardUrl} alt={answerFor != null ? '刚补拍的答案图' : '刚入库的题图'} />
-      {#if answerFor != null}
-        <div class="done">
-          <!-- 重拍就是再走一遍：新的顶掉旧的，旧的那张没人引用就被回收。 -->
-          <button class="pill" onclick={retake}>重拍</button>
-          <button class="pill go" onclick={finishAnswer}>完成</button>
-        </div>
-      {:else}
-        <button class="pill" onclick={retake}>拍下一张</button>
-      {/if}
+      <img class="card" src={pending.url} alt={answerFor != null ? '待保存的答案图' : '待保存的题图'} />
+      <div class="done">
+        <!-- 「重框」不是「重拍」：帧与选框都还留着，只是退回上一步改框。 -->
+        <button class="pill" onclick={backToCrop} disabled={busy}>重框</button>
+        <button class="pill go" onclick={save} disabled={busy}>
+          {busy ? '保存中…' : '保存'}
+        </button>
+      </div>
     </div>
   {:else if frameUrl}
     <div class="shot" bind:this={stage}>
@@ -373,7 +360,8 @@
 
       <div class="tools">
         <button class="pill" onclick={retake} disabled={busy}>重拍</button>
-        <button class="pill go" onclick={confirm} disabled={busy}>{busy ? '处理中…' : '确认'}</button>
+        <!-- 只裁不存：按下去进保存界面，不写库。 -->
+        <button class="pill go" onclick={toPreview} disabled={busy}>确认</button>
         <button class="pill" onclick={rotate} disabled={busy}>旋转</button>
       </div>
     </div>

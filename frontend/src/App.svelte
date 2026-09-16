@@ -152,7 +152,12 @@
   }
   .tab {
     flex: 1;
-    padding: 0.7rem 0.25rem;
+    /* 定高而不是靠内边距撑：行高一变按钮就跟着变，而底栏是最不该自己改高度的地方。
+       3.75rem 是原先那条约 2.5rem 的 1.5 倍。 */
+    height: 3.75rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
     border: 0;
     background: transparent;
     color: rgba(244, 246, 251, 0.5);
