@@ -45,8 +45,24 @@ vars:
 
   # Windows 上 `./gradlew`（无扩展名的 shell 脚本）跑不起来，要用 gradlew.bat；
   # 而且 go-task 内置 shell 的 PATH 里没有 chmod。宿主判据同 compile:go:shared。
+  #
+  # Windows 那一支**必须带 `.\`**：这台机器上的 cmd 不把当前目录算进可执行文件搜索路径 ——
+  # 实测 `cmd /c gradlew.bat`（在 build/android 里、文件就在旁边）报
+  # "not recognized"，而 `cmd /c .\gradlew.bat` 起得来。把 NoDefaultCurrentDirectoryInExePath
+  # 清掉也没用（那是进程启动时读的，父进程每开一个新 shell 都会重新注入）。
+  # 显式路径本来也更好：不依赖 cwd 恰好是 build/android。
+  #
+  # 里面的双引号是**必须的**，而且是给**第二层** sh 看的：这个变量先被 echo 出来、
+  # 拼进任务的脚本正文，再由 sh 解析一遍。上一版写 `echo "cmd /c .\gradlew.bat"`，
+  # 回显出来的正文是对的，但脚本正文里那个 `.\` 是**裸**的 —— sh 把 `\g` 当转义吃掉，
+  # cmd 收到 `.gradlew.bat`（去掉点号前的反斜杠）于是照样报 not recognized。
+  # 引号让 `.\` 活过第二遍解析。
   GRADLEW_BIN:
-    sh: 'case "$(uname -s)" in Windows_NT|MINGW*|MSYS*|CYGWIN*) echo "cmd /c gradlew.bat" ;; *) echo "./gradlew" ;; esac'
+    sh: |-
+      case "$(uname -s)" in
+        Windows_NT|MINGW*|MSYS*|CYGWIN*) echo 'cmd /c ".\gradlew.bat"' ;;
+        *) echo "./gradlew" ;;
+      esac
   GRADLEW_PREP:
     sh: 'case "$(uname -s)" in Windows_NT|MINGW*|MSYS*|CYGWIN*) echo "" ;; *) echo "chmod +x ./gradlew" ;; esac'
 
