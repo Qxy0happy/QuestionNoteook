@@ -1,7 +1,9 @@
 <script lang="ts">
-  // 题库页：错题列表 + 点开看题图。
-  // 排序、落库、取图都在 Go 侧，这里只做取数与呈现 —— spec 说前端是薄视图、不做自动化测试，
-  // 所以能往前端放的逻辑就别放。
+  // 题库页：错题列表 + 点开看题图（答案图按需摊开）。
+  // 列表分成学科页签：「未打标签」打头，接着每一门顶层学科；学科页里左侧还有一棵
+  // 章节/知识点树，用来在那门学科里再收窄。
+  // 排序、落库、取图、筛都在 Go 侧，这里只做取数与呈现 —— spec 说前端是薄视图、不做自动化测试，
+  // 所以能往前端放的逻辑就别放。唯一留在前端的是「这些 id 交给谁筛」这类接线。
 
   import * as Library from '../bindings/questionbook/internal/library/service';
   import type { Question } from '../bindings/questionbook/internal/library/models';
@@ -13,6 +15,8 @@
   import TagFilter from './TagFilter.svelte';
   import Tagging from './Tagging.svelte';
   import Discussion from './Discussion.svelte';
+  // 「有没有答案图」的判断只写在一处（answer.ts），别在这儿再写一遍 q.AnswerHash !== ''。
+  import { hasAnswer } from './answer';
 
   // 三页是同时挂载的，切到这一页才值得拉一次数据。
   // 题库页发起的「补拍答案图」：把这道题交给上层（App），由它切到取景页并进入补拍模式。
@@ -31,6 +35,12 @@
   let openedError = $state('');
   let actionError = $state('');
 
+  // 答案图在详情页是**摊开来看**的，但默认收着：它是对答案用的，不该一进详情就糊在脸上。
+  // 点「看答案图」才去取；没有再点一下收起。取法与题图同一套（同一份缓存、同样的话术）。
+  let showAnswer = $state(false);
+  let answerUrl = $state<string | null>(null);
+  let answerError = $state('');
+
   // 删除是两步的，且不可撤销（图片文件也不是这里删的），所以先问一句。
   let confirming = $state(false);
   let busy = $state(false);
@@ -38,15 +48,55 @@
   // ── 标签 ──
   // 词表是平的（父由 ParentID 指出），怎么画成三层树是 TagFilter 的事。
   let allTags = $state<Tag[]>([]);
-  // 当前筛中的标签；空数组 = 不筛。两层界面各用一份：列表页筛，详情页给单道题打。
+
+  // ── 学科页签 + 左侧细分树 ──
+  // 0 = 「未打标签」那一页。它不是一个标签（标签 id 从 1 起），只是与 Go 侧
+  // 「ParentID 为 0 = 顶层」同一个约定的哨兵值。
+  let subjectTab = $state(0);
+  // 左侧树里勾中的章节/知识点；换学科时清空 —— 那些 id 只属于上一棵树，
+  // 留着会跟着并集一起交上去，把别的学科的题也筛进来。
+  // 详情页那份是 openedTagIDs（给单道题打标签），两者互不相干。
   let picked = $state<number[]>([]);
   let openedTagIDs = $state<number[]>([]);
-  let showFilter = $state(false);
+  // 「新建学科」那个输入框开着没有。入口是标签栏末尾那个 ＋。
+  let showNewSubject = $state(false);
   let showTags = $state(false);
   // 新学科的名字（顶层）。章节与知识点由识别那边建，这里只管用户自己填的学科。
   let newSubject = $state('');
   // 标签相关的失败都归这儿：建学科没成、打标签没写进去。
   let tagError = $state('');
+
+  // 当前页签的学科；null = 停在「未打标签」那一页。
+  const activeSubject = $derived(
+    allTags.find((t) => t.ID === subjectTab && t.Level === 1) ?? null,
+  );
+
+  // 页签上的学科，顺序照 Go 侧 List() 给的顺序（它按 level, created_at, id 排，
+  // 所以顶层学科正好在前，先建的在前）—— 这里不再排一次，再排会跟它打架。
+  const subjects = $derived(allTags.filter((t) => t.Level === 1));
+
+  // 左侧树只画当前这门学科：TagFilter 按 ParentID 拼树、认 ParentID 0 为根，
+  // 所以把学科自己也传进去，它就是这棵树的根，章节与知识点照旧挂在下面。
+  // 顺着 ParentID 一层层捞（最多三层，用队列而不是递归）。
+  const subjectTree = $derived.by(() => {
+    const subject = activeSubject;
+    if (!subject) return [];
+
+    const byParent = new Map<number, Tag[]>();
+    for (const tag of allTags) {
+      const siblings = byParent.get(tag.ParentID);
+      if (siblings) siblings.push(tag);
+      else byParent.set(tag.ParentID, [tag]);
+    }
+
+    const out: Tag[] = [subject];
+    for (let i = 0; i < out.length; i++) out.push(...(byParent.get(out[i].ID) ?? []));
+    return out;
+  });
+
+  // 交给 Go 的筛选集合：**学科本身始终在里面**（页签就是这个意思），左侧树勾的
+  // 章节/知识点是在它之上再收窄 —— 它们本来就在这门学科下面，并集就等于收窄。
+  const effective = $derived(activeSubject ? [activeSubject.ID, ...picked] : []);
 
   // ── VLM 打标签（票据 09）──
   // 识别是**主动触发**且**只读**的：结果先给用户改，保存那一步才写库。
@@ -64,16 +114,24 @@
     return err instanceof Error ? err.message : String(err);
   }
 
-  // 取回来的题图按 hash 存一份：同一道题反复开合不必重走一次 IPC。
-  // 一张题图撑死几百 KB，错题本量小，先不做淘汰。
+  // 取回来的图按内容 hash 存一份：同一道题反复开合不必重走一次 IPC。
+  // 题图与答案图共用这一份 —— 键是内容 hash，同 hash 就是同一张图，分开存没有意义。
+  // 一张图撑死几百 KB，错题本量小，先不做淘汰。
   const cards = new Map<string, string>();
 
   async function refresh() {
     loading = true;
     try {
       // 后端已按创建时间倒序排好（新的在前），这里不再排一次 —— 再排会跟它的并列规则打架。
-      // 空数组 = 不筛 = 全部错题，点父标签会自动带上子孙，所以筛与不筛是同一个调用。
-      questions = (await Tags.QuestionsByTags(picked)) ?? [];
+      if (activeSubject) {
+        // 学科页：学科本身 + 左侧树勾上的章节/知识点（这是并集，见 effective）。
+        // 点父标签会自动带上子孙，所以筛与不筛是同一个调用。
+        questions = (await Tags.QuestionsByTags(effective)) ?? [];
+      } else {
+        // 未打标签页：空数组在 QuestionsByTags 里是「不筛」（= 全部错题），
+        // 表达不了「一条标签都没挂」，所以走单独那条查询。
+        questions = (await Tags.UntaggedQuestions()) ?? [];
+      }
       listError = '';
     } catch (err) {
       listError = errorMessage(err);
@@ -108,6 +166,10 @@
     confirming = false;
     showTags = false;
     openedTagIDs = [];
+    // 答案图重新收起来：换一道题就该从「只看题图」开始，上一道的答案不该跟过来。
+    showAnswer = false;
+    answerUrl = null;
+    answerError = '';
     void loadTags(q.ID);
     openedUrl = cards.get(q.QuestionHash) ?? null;
     if (openedUrl) return;
@@ -134,6 +196,43 @@
     if (opened) onCaptureAnswer?.(opened);
   }
 
+  // 「看答案图 / 收起」。收起时**不**把取到的图丢掉：同一道题再点开是瞬时的，
+  // 反正它就在内存缓存里（cards），下次开这道题照样便宜。
+  async function toggleAnswer() {
+    const q = opened;
+    if (!q) return;
+    if (showAnswer) {
+      showAnswer = false;
+      return;
+    }
+    showAnswer = true;
+    if (answerUrl) return; // 这道题刚才已经取到过了
+    if (!hasAnswer(q)) return; // 入口本来就不出现，这里是兜底
+
+    answerError = '';
+    const cached = cards.get(q.AnswerHash);
+    if (cached) {
+      answerUrl = cached;
+      return;
+    }
+
+    try {
+      // 与题图同一个读路径（答案图的读也归题库），回来的同样是 PNG 的 base64。
+      const base64 = await Library.AnswerImage(q.AnswerHash);
+      // 取图是异步的：这中间用户可能已经返回、或换了一道题 —— 别把旧图贴上去。
+      if (opened?.ID !== q.ID) return;
+      if (!base64) {
+        answerError = '这道题的答案图不在，可能已被清理';
+        return;
+      }
+      const url = `data:image/png;base64,${base64}`;
+      cards.set(q.AnswerHash, url);
+      answerUrl = url;
+    } catch (err) {
+      if (opened?.ID === q.ID) answerError = errorMessage(err);
+    }
+  }
+
   // ── 标签：取词表、筛列表、给一道题打标签 ──
 
   async function refreshTags() {
@@ -145,10 +244,27 @@
     }
   }
 
-  // 筛选面板勾选变了：先记下筛了什么，再重拉一次列表。
+  // 左侧树勾选变了：先记下勾了什么，再重拉一次列表。
   function pickTags(ids: number[]) {
     picked = ids;
     void refresh();
+  }
+
+  // 换学科页签。勾过的章节/知识点属于上一棵树，必须清掉 ——
+  // 否则它们会跟着并集一起交上去，把别的学科（或跨学科）的题筛进来。
+  function selectTab(id: number) {
+    if (id === subjectTab) return;
+    subjectTab = id;
+    picked = [];
+    showNewSubject = false;
+    void refresh();
+  }
+
+  function toggleNewSubject() {
+    showNewSubject = !showNewSubject;
+    tagError = ''; // 换一处动作，上一次的报错别留着
+    // 收起来就把没提交的名字丢掉：它没有被记住过，留着下次会变成一个意外冒出来的输入。
+    if (!showNewSubject) newSubject = '';
   }
 
   async function createSubject() {
@@ -156,10 +272,13 @@
     if (!name) return;
     try {
       // 0 = 顶层：没有父的标签就是学科，层级由这一条推出来，不用自己算。
+      // 这一格永远建**学科**，即使当前正停在某门学科里 —— 输入框上就写着「新建学科」。
       await Tags.Create(0, name);
       newSubject = '';
       tagError = '';
       await refreshTags();
+      // 新学科是空的，切过去只会看到一页空列表；留在原地，它的页签已经出现在栏里了。
+      showNewSubject = false;
     } catch (err) {
       // 同级重名会以错误回来（后端不做 upsert），那就把它说出来，别静默吞掉。
       tagError = errorMessage(err);
@@ -260,6 +379,9 @@
     confirming = false;
     showTags = false;
     openedTagIDs = [];
+    showAnswer = false;
+    answerUrl = null;
+    answerError = '';
     tagError = '';
     closeTagging();
   }
@@ -323,11 +445,20 @@
       {/if}
     </header>
 
-    <!-- 题图上的两个动作单起一行：顶栏挤着「返回 + 时间 + 删除」，再塞两个进去就点不准了。 -->
+    <!-- 题图上那几个动作单起一行：顶栏挤着「返回 + 时间 + 删除」，再塞进去就点不准了。
+         窄屏上放不下就换行（见 .actions）。 -->
     <div class="actions">
       <button class="ghost" onclick={captureAnswer}>
         {opened.AnswerHash ? '重拍答案图' : '补拍答案图'}
       </button>
+      <!-- 看答案图是个开关，**默认收着**：它是对答案用的，不该一进详情就糊在脸上。
+           没有答案图的题不给这个入口 —— 上面那个按钮正写着「补拍答案图」，
+           那句话说完了，再多一个不能用的按钮只会让人点空。 -->
+      {#if hasAnswer(opened)}
+        <button class="ghost" class:on={showAnswer} onclick={toggleAnswer}>
+          {showAnswer ? '收起答案图' : '看答案图'}
+        </button>
+      {/if}
       <button class="ghost" class:on={openedTagIDs.length > 0} onclick={toggleTags}>
         标签{openedTagIDs.length > 0 ? ` ${openedTagIDs.length}` : ''}
       </button>
@@ -353,6 +484,20 @@
         <p class="hint">正在取题图…</p>
       {/if}
     </div>
+
+    {#if showAnswer}
+      <!-- 摊在题图下面，两块各分一半高度，对着看（复习页宽屏上也是这个排法）。
+           三种状态与题图一模一样：有图 / 取不到（文件被清理）/ 还在取。 -->
+      <div class="stage answer">
+        {#if answerUrl}
+          <img src={answerUrl} alt="答案图" />
+        {:else if answerError}
+          <p class="hint error">{answerError}</p>
+        {:else}
+          <p class="hint">正在取答案图…</p>
+        {/if}
+      </div>
+    {/if}
 
     {#if showTags}
       <!-- 面板跟题图并排存在：打标签的时候得看得见题，否则等于闭着眼睛分类。 -->
@@ -387,51 +532,103 @@
     <header class="bar">
       <span class="bar-title">题库</span>
       {#if questions.length > 0}
-        <span class="count">{picked.length > 0 ? `筛出 ${questions.length} 道` : `${questions.length} 道`}</span>
+        <span class="count">
+          {effective.length > 0 ? `筛出 ${questions.length} 道` : `${questions.length} 道`}
+        </span>
       {/if}
-      <button class="ghost" class:on={picked.length > 0} onclick={() => (showFilter = !showFilter)}>
-        筛选{picked.length > 0 ? ` ${picked.length}` : ''}
-      </button>
     </header>
 
     {#if tagError}
       <p class="banner">{tagError}</p>
     {/if}
 
-    {#if showFilter}
-      <div class="panel">
-        <TagFilter tags={allTags} selected={picked} onSelect={pickTags} />
+    <!-- 学科页签：「未打标签」打头，接着是每一门顶层学科，顺序照 Go 侧 List() 给的顺序。
+         装不下就横着滚（学科由用户自己加，没有上限）。 -->
+    <nav class="tabs">
+      <button class="ghost tab" class:on={activeSubject === null} onclick={() => selectTab(0)}>
+        未打标签
+      </button>
+      {#each subjects as subject (subject.ID)}
+        <button
+          class="ghost tab"
+          class:on={activeSubject?.ID === subject.ID}
+          onclick={() => selectTab(subject.ID)}
+        >
+          {subject.Name}
+        </button>
+      {/each}
 
-        <!-- 顶层学科由用户自己填（预置的四门只是初始值），所以这里得有个入口。
-             章节与知识点由识别那边建，这一格只管学科。 -->
-        <div class="new-subject">
-          <input bind:value={newSubject} placeholder="新建学科" onkeydown={onSubjectKey} />
-          <button class="ghost" onclick={createSubject} disabled={!newSubject.trim()}>添加</button>
-        </div>
+      <!-- 新建学科的入口放在末尾：顶层学科由用户自己填（预置的四门只是初始值），
+           点开仍是那个输入框。章节与知识点由识别那边建，这一格只管学科。 -->
+      <button
+        class="ghost tab plus"
+        class:on={showNewSubject}
+        onclick={toggleNewSubject}
+        aria-label="新建学科"
+      >
+        ＋
+      </button>
+    </nav>
+
+    {#if showNewSubject}
+      <div class="new-subject">
+        <input bind:value={newSubject} placeholder="新建学科" onkeydown={onSubjectKey} />
+        <button class="ghost" onclick={createSubject} disabled={!newSubject.trim()}>添加</button>
       </div>
     {/if}
 
-    {#if listError}
-      <p class="hint error">{listError}</p>
-    {:else if loading && questions.length === 0}
-      <p class="hint">正在读题库…</p>
-    {:else if questions.length === 0}
-      <div class="empty">
-        <p class="empty-main">还没有错题</p>
-        <p class="empty-sub">滑到中间那页拍一道，它就会出现在这里。</p>
+    <!-- 「未打标签」那一页没有树可画（一条标签都没挂，没有可筛的），整幅宽度给列表。 -->
+    <div class="browse">
+      {#if activeSubject}
+        <aside class="side">
+          <!-- 与详情页打标签用的是同一棵树：章节与知识点交给它画，勾选与半选照旧。
+               fill 让它撑满这一列、自己滚；标题写学科名，省得再猜这列筛的是哪一门。 -->
+          <TagFilter
+            tags={subjectTree}
+            selected={picked}
+            onSelect={pickTags}
+            title={activeSubject.Name}
+            fill
+          />
+        </aside>
+      {/if}
+
+      <div class="listpane">
+        {#if listError}
+          <p class="hint error">{listError}</p>
+        {:else if loading && questions.length === 0}
+          <p class="hint">正在读题库…</p>
+        {:else if questions.length === 0}
+          <div class="empty">
+            {#if activeSubject}
+              {#if picked.length > 0}
+                <p class="empty-main">这些章节下还没有错题</p>
+                <p class="empty-sub">
+                  左侧树里勾的是「{activeSubject.Name}」下的章节或知识点，去掉几个勾可能就有题了。
+                </p>
+              {:else}
+                <p class="empty-main">这门学科下还没有错题</p>
+                <p class="empty-sub">给错题打上「{activeSubject.Name}」的标签，它就会出现在这里。</p>
+              {/if}
+            {:else}
+              <p class="empty-main">没有未打标签的错题</p>
+              <p class="empty-sub">滑到中间那页拍一道，它就会出现在这里 —— 打上标签之后才归到学科页。</p>
+            {/if}
+          </div>
+        {:else}
+          <ul class="list">
+            {#each questions as q (q.ID)}
+              <li>
+                <button class="row" onclick={() => open(q)}>
+                  <span class="row-time">{formatTime(q.CreatedAt)}</span>
+                  <AnswerBadge q={q} />
+                </button>
+              </li>
+            {/each}
+          </ul>
+        {/if}
       </div>
-    {:else}
-      <ul class="list">
-        {#each questions as q (q.ID)}
-          <li>
-            <button class="row" onclick={() => open(q)}>
-              <span class="row-time">{formatTime(q.CreatedAt)}</span>
-              <AnswerBadge q={q} />
-            </button>
-          </li>
-        {/each}
-      </ul>
-    {/if}
+    </div>
   {/if}
 </div>
 
@@ -492,6 +689,60 @@
     color: #ffb4b4;
   }
 
+  /* 学科页签。横向排、装不下横着滚 —— 学科是用户自己加的，数量没有上限。 */
+  .tabs {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.6rem 1rem;
+    border-bottom: 1px solid rgba(244, 246, 251, 0.1);
+    overflow-x: auto;
+    /* 滑到头不把整页三页横滑也带走。 */
+    overscroll-behavior-x: contain;
+  }
+  .tab {
+    padding: 0.35rem 0.8rem;
+    font-size: 0.9rem;
+  }
+  /* 选中的那一个要一眼看得出来：它决定这一页筛的是哪一门。 */
+  .tab.on {
+    background: rgba(122, 162, 255, 0.22);
+    border-color: rgba(130, 200, 255, 0.6);
+    color: #cfe2ff;
+  }
+  .tab.plus {
+    padding: 0.35rem 0.7rem;
+    font-weight: 700;
+  }
+
+  /* 左树 + 列表。树只在学科页出现，所以「未打标签」上这一层里只有列表，宽度整幅归它。 */
+  .browse {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+  }
+  /* 左侧树的宽度：手机竖屏（主场景，360–430px 宽）下取 36vw ≈ 130–155px，
+     给列表留下约 64%。行里只有「时间 + 有/缺答案图」两样，393px 的屏上排下来
+     约 205px，留下 250px 是够的；知识点再缩进一档，36vw 里也还放得下四五个字。
+     两头都收了口：最窄 8rem —— 再窄树里的名字就只剩两个字，等于没法点；
+     最宽 11rem —— 它只是一列筛选，宽屏上再宽也没用，列表那边要放图。 */
+  .side {
+    flex: none;
+    width: clamp(8rem, 36vw, 11rem);
+    display: flex;
+    flex-direction: column;
+    padding: 0.6rem 0.4rem 0.6rem 0.6rem;
+    border-right: 1px solid rgba(244, 246, 251, 0.1);
+  }
+  .listpane {
+    flex: 1;
+    /* 列表被树挤窄时，行里的内容自己截断而不是把这一栏撑出去。 */
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
   .list {
     flex: 1;
     min-height: 0;
@@ -541,23 +792,27 @@
     padding: 0.6rem 1rem 0;
   }
 
-  /* 有一项「开着」的按钮：筛选开着、或者这道题有标签。不改变形状，只换颜色。 */
+  /* 有一项「开着」的按钮：这块面板开着、选中了哪个页签、或者这道题有标签。
+     不改变形状，只换颜色。 */
   .ghost.on {
     border-color: rgba(130, 200, 255, 0.6);
     color: #9fd4ff;
   }
 
-  /* 筛选面板与打标签面板共用同一格。树自己会滚（TagFilter 里封了 40vh），这里不再套一层。 */
+  /* 打标签与识别那两块面板共用同一格。树自己会滚（TagFilter 里封了 40vh），这里不再套一层。 */
   .panel {
     flex: 0 0 auto;
     padding: 0.75rem 1rem;
     border-top: 1px solid rgba(244, 246, 251, 0.1);
   }
 
+  /* 新建学科那一行：贴在页签栏下面（它由页签末尾的 ＋ 开出来），所以自带一行的内外边距。 */
   .new-subject {
+    flex: none;
     display: flex;
     gap: 0.5rem;
-    margin-top: 0.6rem;
+    padding: 0.6rem 1rem;
+    border-bottom: 1px solid rgba(244, 246, 251, 0.1);
   }
   .new-subject input {
     flex: 1;
@@ -580,6 +835,10 @@
     display: grid;
     place-items: center;
     padding: 0.75rem;
+  }
+  /* 答案图摊开时与题图各占一半（两块都是 flex:1），中间画一条线分开。 */
+  .stage.answer {
+    border-top: 1px solid rgba(244, 246, 251, 0.1);
   }
   .stage img {
     max-width: 100%;

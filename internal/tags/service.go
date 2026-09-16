@@ -153,6 +153,15 @@ func (s *Service) QuestionsByTags(tagIDs []int64) ([]library.Question, error) {
 	return s.questions.ListQuestionsTaggedWith(tagIDs)
 }
 
+// UntaggedQuestions 返回**一条标签都没挂**的错题，新的在前。
+//
+// 这是 QuestionsByTags 之外单独的一条，不是它的特例：那边的空数组含义是「不筛」，
+// 返回全部；而「未打标签」恰恰是个筛选条件（一个标签都没挂上），空数组表达不了。
+// 界面上的「未打标签」页签走的就是这里。
+func (s *Service) UntaggedQuestions() ([]library.Question, error) {
+	return s.tags.untaggedQuestions()
+}
+
 // checkQuestion 确认这道错题存在。
 //
 // 写之前先查一次：拿一个不存在的 id 来写，应当收到 ErrNotFound，

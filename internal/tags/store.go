@@ -13,9 +13,14 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"questionbook/internal/library"
 )
 
 // Store 是标签与「错题-标签」关联的持久化层。
+//
+// 它也读 questions 表一处 —— untaggedQuestions（「一个标签都没挂」的落点在关联表上，
+// 见那个方法的注释）。
 //
 // db 是**错题库**那一条连接，不是本包自己 Open 的：两者在同一份库文件里，
 // 没有理由让两个连接池去抢同一把写锁。
@@ -298,6 +303,51 @@ func (s *Store) tagsOfQuestions(questionIDs []int64) ([]QuestionTags, error) {
 		out = append(out, QuestionTags{QuestionID: id, Tags: ts})
 	}
 	return out, nil
+}
+
+// untaggedQuestions 返回**一条标签都没挂**的错题，新的在前。
+//
+// 它读的是 questions 表，但落点在 question_tags 上：「没有关联行」是**关联表**的属性，
+// 是标签规则的一种（对面那种是「挂上了某个标签」，在 library 的 ListQuestionsTaggedWith）。
+// 表结构与连接都是同一份，所以放在本包不改变任何所有权，只是别处搜不到这条查询而已。
+//
+// 排序与 ListQuestions、ListQuestionsTaggedWith 一致（新的在前），
+// 这样「未打标签」与其他标签页翻起来是同一个手感。
+func (s *Store) untaggedQuestions() ([]library.Question, error) {
+	// 用 NOT EXISTS 而不是 LEFT JOIN ... IS NULL，也不用 NOT IN：
+	//   - 它就是这句话本身（「没有一行指向它」），读的人不必先认出 LEFT JOIN 的意图；
+	//   - 一行题只会出一行（LEFT JOIN 得靠 DISTINCT 兜底），排序不会被关联行数搅乱；
+	//   - NOT IN 碰上 NULL 会整条查询不出任何结果，这个坑没必要留着。
+	// question_tags 的主键是 (question_id, tag_id) 且是 WITHOUT ROWID，
+	// 所以这个子查询是按题走一次主键查找，不是每题扫一遍全表。
+	rows, err := s.db.Query(
+		`SELECT q.id, q.question_hash, q.answer_hash, q.created_at
+		 FROM questions q
+		 WHERE NOT EXISTS (SELECT 1 FROM question_tags qt WHERE qt.question_id = q.id)
+		 ORDER BY q.created_at DESC, q.id DESC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("列未打标签的错题: %w", err)
+	}
+	defer rows.Close()
+
+	qs := []library.Question{} // 空切片而不是 nil：前端拿到的是 []，不是 null
+	for rows.Next() {
+		var (
+			q  library.Question
+			ms int64
+		)
+		// 列的顺序与 library 的 scanQuestion 一致（那边没导出，扫法在这边再写一遍）。
+		if err := rows.Scan(&q.ID, &q.QuestionHash, &q.AnswerHash, &ms); err != nil {
+			return nil, fmt.Errorf("读未打标签的错题: %w", err)
+		}
+		q.CreatedAt = time.UnixMilli(ms).UTC()
+		qs = append(qs, q)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("列未打标签的错题: %w", err)
+	}
+	return qs, nil
 }
 
 // placeholders 生成 n 个 "?"，给动态 IN 列表用。

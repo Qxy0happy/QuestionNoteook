@@ -747,6 +747,81 @@ func TestQuestionsSurviveTagDeletion(t *testing.T) {
 	assertQuestionIDs(t, mustFilter(t, svc, []int64{point.ID}))
 }
 
+// mustUntagged 取「一条标签都没挂」的错题，失败即终止测试。
+func mustUntagged(t *testing.T, svc *tags.Service) []library.Question {
+	t.Helper()
+
+	qs, err := svc.UntaggedQuestions()
+	if err != nil {
+		t.Fatalf("UntaggedQuestions: %v", err)
+	}
+	return qs
+}
+
+// 未打标签是单独一条查询：QuestionsByTags 的空数组含义是「不筛」，表达不了「一条都没挂」。
+//
+// 三件事要钉住：挂了标签的不出现、没挂的出现、摘掉/删掉标签之后那道题会回到这个集合里。
+func TestUntaggedQuestions(t *testing.T) {
+	svc, lib := newService(t)
+	subject, _, point := seedTree(t, svc)
+	foreign := findSubject(t, svc, "英语")
+
+	// 创建时间一道比一道新（见 addQuestionAt 的注释），这样「在不在集合里」与
+	// 「新的在前」用同一批数据就能一起断言。
+	bySubject := addQuestionAt(t, lib, "sha256:挂了学科", baseTime)
+	byPoint := addQuestionAt(t, lib, "sha256:挂了知识点", baseTime.Add(time.Minute))
+	byForeign := addQuestionAt(t, lib, "sha256:挂了别的学科", baseTime.Add(2*time.Minute))
+	bareOld := addQuestionAt(t, lib, "sha256:没挂标签", baseTime.Add(3*time.Minute))
+	bareNew := addQuestionAt(t, lib, "sha256:也没挂标签", baseTime.Add(4*time.Minute))
+
+	if err := svc.SetQuestionTags(bySubject.ID, []int64{subject.ID}); err != nil {
+		t.Fatalf("SetQuestionTags(学科): %v", err)
+	}
+	if err := svc.SetQuestionTags(byPoint.ID, []int64{point.ID}); err != nil {
+		t.Fatalf("SetQuestionTags(知识点): %v", err)
+	}
+	if err := svc.SetQuestionTags(byForeign.ID, []int64{foreign.ID}); err != nil {
+		t.Fatalf("SetQuestionTags(别的学科): %v", err)
+	}
+
+	// 挂了标签的三道一道都不在；没挂的两道都在，新的在前。
+	assertQuestionIDs(t, mustUntagged(t, svc), bareNew.ID, bareOld.ID)
+
+	// 摘掉全部标签 → 回到这个集合（它挂的是学科，摘完与「从没打过标签」没有区别）。
+	if err := svc.SetQuestionTags(bySubject.ID, nil); err != nil {
+		t.Fatalf("SetQuestionTags(摘掉全部): %v", err)
+	}
+	assertQuestionIDs(t, mustUntagged(t, svc), bareNew.ID, bareOld.ID, bySubject.ID)
+
+	// 删掉标签本身 → 挂着它的那道题被摘空，也跟着回来。
+	// 删的是知识点，它上面只挂着 byPoint 一道题。
+	if _, err := svc.Delete(point.ID); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	assertQuestionIDs(t, mustUntagged(t, svc), bareNew.ID, bareOld.ID, byPoint.ID, bySubject.ID)
+
+	// 换个标签页筛：挂了别的学科那道题只在它自己的学科里；
+	// 而这个学科下一道都不剩了（bySubject 的标签刚被摘空，byPoint 的随知识点一起删了）。
+	assertQuestionIDs(t, mustFilter(t, svc, []int64{foreign.ID}), byForeign.ID)
+	assertQuestionIDs(t, mustFilter(t, svc, []int64{subject.ID}))
+
+	// 题被删掉之后不该再出现在这个集合里（这条查询读的是 questions 表）。
+	if _, err := lib.DeleteQuestion(bareNew.ID); err != nil {
+		t.Fatalf("DeleteQuestion: %v", err)
+	}
+	assertQuestionIDs(t, mustUntagged(t, svc), bareOld.ID, byPoint.ID, bySubject.ID)
+}
+
+// 库里一道题都没有时回空切片而不是 nil —— 与其他列表查询一个口径，前端拿到的是 []。
+func TestUntaggedQuestionsOnEmptyLibrary(t *testing.T) {
+	svc, _ := newService(t)
+
+	qs := mustUntagged(t, svc)
+	if qs == nil || len(qs) != 0 {
+		t.Errorf("空库应当回空切片，回了 %+v", qs)
+	}
+}
+
 // 删错题要把它的标签关联一起带走，不能留下指向不存在错题的孤儿行
 // （外键 cascade 做的，dsn 里开着 foreign_keys —— 这条测试就是钉住那件事）。
 func TestDeleteQuestionLeavesNoOrphanLinks(t *testing.T) {

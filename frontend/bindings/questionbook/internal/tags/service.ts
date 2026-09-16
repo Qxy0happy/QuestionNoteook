@@ -128,3 +128,14 @@ export function TagsOfQuestion(questionID: number): $CancellablePromise<$models.
 export function TagsOfQuestions(questionIDs: number[] | null): $CancellablePromise<$models.QuestionTags[] | null> {
     return $Call.ByID(512636766, questionIDs);
 }
+
+/**
+ * UntaggedQuestions 返回**一条标签都没挂**的错题，新的在前。
+ * 
+ * 这是 QuestionsByTags 之外单独的一条，不是它的特例：那边的空数组含义是「不筛」，
+ * 返回全部；而「未打标签」恰恰是个筛选条件（一个标签都没挂上），空数组表达不了。
+ * 界面上的「未打标签」页签走的就是这里。
+ */
+export function UntaggedQuestions(): $CancellablePromise<library$0.Question[] | null> {
+    return $Call.ByID(3191954599);
+}

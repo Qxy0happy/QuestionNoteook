@@ -11,6 +11,10 @@
   //
   // 同一个组件也是「给一道错题打标签」的勾选面板：那边把 selected 换成那道题当前挂的标签，
   // 在 onSelect 里存一次 Tags.SetQuestionTags(id, ids) 即可 —— 两边要的是同一样东西。
+  //
+  // 第三处用法在学科页的左侧栏：那边传的是**一门学科的子树**（学科自己当树根），
+  // 再带上 fill（撑满那一列、自己滚）与 title（写上学科名）。树的画法、勾选与半选
+  // 三处完全相同，所以不另写一棵。
 
   // 只用到标签的这四个字段，所以不从生成的 bindings 里 import 类型：组件是纯视图，
   // 形状对得上就够，接线的传 tags.Tag[] 进来也照样通过（字段名与 Go 侧一一对应）。
@@ -23,9 +27,17 @@
     selected?: number[];
     /** 选中项变化时回调。传的是**新的**整份 id 数组，不是增量。 */
     onSelect?: (ids: number[]) => void;
+    /** 顶上那行标题。默认是「按标签筛」；左侧栏里传学科名，传空串就把整行收掉。 */
+    title?: string;
+    /**
+     * 撑满容器高度、树自己滚（左侧栏），而不是封在 40vh 里（并排面板）。
+     * 面板是嵌在详情页当中的一块，长到 40vh 就该自己滚；左侧栏是一整列，
+     * 高度由布局给，40vh 会把下半截白白空着。
+     */
+    fill?: boolean;
   }
 
-  let { tags, selected = [], onSelect }: Props = $props();
+  let { tags, selected = [], onSelect, title = '按标签筛', fill = false }: Props = $props();
 
   // 按父节点分组，一次遍历。Go 侧顶层学科的 ParentID 是 0，所以 0 就是根。
   const children = $derived.by(() => {
@@ -97,13 +109,15 @@
   </label>
 {/snippet}
 
-<section class="tag-filter">
-  <header class="head">
-    <span class="title">按标签筛</span>
-    {#if selected.length > 0}
-      <button class="clear" onclick={clear}>清空</button>
-    {/if}
-  </header>
+<section class="tag-filter" class:fill>
+  {#if title || selected.length > 0}
+    <header class="head">
+      {#if title}<span class="title">{title}</span>{/if}
+      {#if selected.length > 0}
+        <button class="clear" onclick={clear}>清空</button>
+      {/if}
+    </header>
+  {/if}
 
   {#if tags.length === 0}
     <p class="hint">还没有标签。给错题打标签时会建出来。</p>
@@ -137,6 +151,10 @@
     min-height: 0;
     gap: 0.4rem;
   }
+  /* 左侧栏那一份：撑满父容器（父是 flex 列），让下面的 .tree 拿到剩下的高度。 */
+  .tag-filter.fill {
+    flex: 1;
+  }
 
   .head {
     display: flex;
@@ -149,8 +167,16 @@
     font-weight: 600;
     letter-spacing: 0.04em;
     color: rgba(244, 246, 251, 0.6);
+    /* 左侧栏里这行写的是学科名，可能比那一列还长；「清空」一出现更是挤。
+       让它自己截断，别把「清空」顶出去。 */
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .clear {
+    /* 左边的标题可能很长（左侧栏写的是学科名），这一颗别跟着被挤扁。 */
+    flex: none;
     padding: 0.25rem 0.7rem;
     border: 1px solid rgba(244, 246, 251, 0.24);
     border-radius: 999px;
@@ -175,6 +201,11 @@
     max-height: 40vh;
     overflow-y: auto;
     overscroll-behavior: contain;
+  }
+  /* 左侧栏：高度由父容器给（见 .tag-filter.fill），那一列多高树就多高。 */
+  .tag-filter.fill .tree {
+    flex: 1;
+    max-height: none;
   }
   .kids {
     margin: 0;
