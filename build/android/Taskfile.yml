@@ -321,9 +321,10 @@ tasks:
           # Pick the highest-API installed image matching the host ABI.
           SDK_ROOT="{{.SDK_ROOT}}"
           ABI="{{.ANDROID_ABI}}"
-          IMG=$(ls -d "$SDK_ROOT"/system-images/android-*/*/"$ABI" 2>/dev/null | sort -V | tail -1)
+          # 不用 sort -V：该内置 shell 里 sort 落到 Windows 的 sort，不认 -V 且静默吐空。
+          IMG=$(ls -d "$SDK_ROOT"/system-images/android-*/*/"$ABI" 2>/dev/null | tail -1)
           AVDMANAGER="{{.AVDMANAGER}}"
-          if [ -n "$IMG" ] && [ -x "$AVDMANAGER" ]; then
+          if [ -n "$IMG" ] && [ -f "$AVDMANAGER" ]; then
             PKG="system-images;$(echo "$IMG" | sed "s|$SDK_ROOT/system-images/||" | tr '/' ';')"
             echo "No Android Virtual Devices found. Creating 'wails' from $PKG..."
             echo "no" | "$AVDMANAGER" create avd --name wails --package "$PKG" --device pixel_7 --force
@@ -363,9 +364,12 @@ tasks:
         echo "Emulator boot timeout"
         exit 1
     preconditions:
-      - sh: '[ -x "{{.ADB}}" ] || command -v adb'
+      # Windows 的文件模式没有真正的可执行位，`-x` 恒为假（实测：adb 明明能调起来，
+      # 这条判据却报 "adb not found"）—— 用 `-f` 判断文件存在就够。
+      - sh: '[ -f "{{.ADB}}" ] || command -v adb'
         msg: "adb not found. Install the Android SDK platform-tools (or set ANDROID_HOME)"
-      - sh: '[ -x "{{.EMULATOR}}" ] || command -v emulator'
+      # 同上：`-x` 在 Windows 上恒为假。
+      - sh: '[ -f "{{.EMULATOR}}" ] || command -v emulator'
         msg: "emulator not found. Install the Android SDK emulator package (or set ANDROID_HOME)"
 
   deploy-emulator:
@@ -433,7 +437,9 @@ tasks:
         "{{.ADB}}" -s "$DEVICE" install "{{.BIN_DIR}}/{{.APP_NAME}}.apk"
         "{{.ADB}}" -s "$DEVICE" shell am start -n {{.APP_ID}}/com.wails.app.MainActivity
     preconditions:
-      - sh: '[ -x "{{.ADB}}" ] || command -v adb'
+      # Windows 的文件模式没有真正的可执行位，`-x` 恒为假（实测：adb 明明能调起来，
+      # 这条判据却报 "adb not found"）—— 用 `-f` 判断文件存在就够。
+      - sh: '[ -f "{{.ADB}}" ] || command -v adb'
         msg: "adb not found. Install the Android SDK platform-tools (or set ANDROID_HOME)"
 
   deploy-device:
@@ -472,7 +478,9 @@ tasks:
         "{{.ADB}}" -s "$DEVICE" install "{{.BIN_DIR}}/{{.APP_NAME}}.apk"
         "{{.ADB}}" -s "$DEVICE" shell am start -n {{.APP_ID}}/com.wails.app.MainActivity
     preconditions:
-      - sh: '[ -x "{{.ADB}}" ] || command -v adb'
+      # Windows 的文件模式没有真正的可执行位，`-x` 恒为假（实测：adb 明明能调起来，
+      # 这条判据却报 "adb not found"）—— 用 `-f` 判断文件存在就够。
+      - sh: '[ -f "{{.ADB}}" ] || command -v adb'
         msg: "adb not found. Install the Android SDK platform-tools (or set ANDROID_HOME)"
 
   studio:
