@@ -76,7 +76,11 @@ type Turn struct {
 type Asker interface {
 	// Ask 就 questionID 这道题把 history 发出去，返回模型的回答。
 	// history 的最后一条必须是要问的那句（用户消息）。
-	Ask(questionID int64, history []vlm.Message) (vlm.Reply, error)
+	//
+	// streamID 由**界面**编好传进来（见 vlm.StreamDelta 的说明）：实现那边拿它给这一轮
+	// 播出去的每一片做记号，界面按它筛出自己那一次的。传空串就是不要流式。
+	// 本包不解释它、也不留它 —— 它是「这一次调用」的记号，一轮过去就没用了。
+	Ask(questionID int64, history []vlm.Message, streamID string) (vlm.Reply, error)
 }
 
 var (

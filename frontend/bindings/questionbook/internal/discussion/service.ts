@@ -30,9 +30,13 @@ import * as $models from "./models.js";
  *   - 题不存在 → library.ErrNotFound
  *   - 模型没回答（空文本）→ ErrEmptyReply
  *   - 没配 VLM / 网络 / 服务方报错 → provider 那边原样冒上来
+ * 
+ * streamID 由界面编好传进来，只为让**这一轮**的回答边生成边显示（见 Asker.Ask）。
+ * 它不落库：拿回答那一句话永远来自下面那个返回值（流式的分片只是给眼睛看的），
+ * 于是「流式与非流式最终写进库里的东西一样」这件事，在这里就是同一行代码在写。
  */
-export function Ask(questionID: number, text: string): $CancellablePromise<$models.Turn> {
-    return $Call.ByID(3866921011, questionID, text);
+export function Ask(questionID: number, text: string, streamID: string): $CancellablePromise<$models.Turn> {
+    return $Call.ByID(3866921011, questionID, text, streamID);
 }
 
 /**
@@ -48,9 +52,11 @@ export function Ask(questionID: number, text: string): $CancellablePromise<$mode
  * 说在动手之前（见 Discussion.svelte 的编辑态）。
  * 
  * 只能改**用户自己**说的那句；模型那条走 Regenerate。
+ * 
+ * streamID 与 Ask 那个是同一个东西：这一轮边生成边显示用的。
  */
-export function EditAndResend(questionID: number, messageID: number, text: string): $CancellablePromise<$models.Message[] | null> {
-    return $Call.ByID(3868957616, questionID, messageID, text);
+export function EditAndResend(questionID: number, messageID: number, text: string, streamID: string): $CancellablePromise<$models.Message[] | null> {
+    return $Call.ByID(3868957616, questionID, messageID, text, streamID);
 }
 
 /**
@@ -83,7 +89,9 @@ export function Presets(): $CancellablePromise<string[] | null> {
  * 只认最后一条记录、而且它得是模型的回答，位置不对返回 ErrNotRegeneratable。
  * 「重说中间某一条回答」听着像同一件事，其实要顺手丢掉它后面那几轮对话 —— 那是用户
  * 没要求过的删除，不该藏在「重新生成」这个动作里。要那个效果走 EditAndResend。
+ * 
+ * streamID 与 Ask 那个是同一个东西：这一轮边生成边显示用的。落库的仍然是返回值里那一句。
  */
-export function Regenerate(questionID: number, messageID: number): $CancellablePromise<$models.Message[] | null> {
-    return $Call.ByID(3019308172, questionID, messageID);
+export function Regenerate(questionID: number, messageID: number, streamID: string): $CancellablePromise<$models.Message[] | null> {
+    return $Call.ByID(3019308172, questionID, messageID, streamID);
 }

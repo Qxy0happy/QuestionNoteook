@@ -64,7 +64,7 @@ func TestRegenerateCarriesReasoningOnTheNewAnswer(t *testing.T) {
 	}
 
 	h.fake.Turns = []vlm.Reply{{Text: "第二次回答", Reasoning: "换一条路子：先配方再求导。"}}
-	got, err := h.svc.Regenerate(q.ID, turn.Reply.ID)
+	got, err := h.svc.Regenerate(q.ID, turn.Reply.ID, h.streamID)
 	if err != nil {
 		t.Fatalf("Regenerate: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestEditAndResendCarriesReasoningOnTheNewAnswer(t *testing.T) {
 	// 把提问改一个字再重发。返回的整段里只有新生成的那条回答带思考过程。
 	// Turns 是**另起一份**（优先于 Replies，而且从头数起），所以这里只摆这一次要用的那条。
 	h.fake.Turns = []vlm.Reply{{Text: "第二次回答", Reasoning: "他改的是问法，答案其实不用变。"}}
-	got, err := h.svc.EditAndResend(q.ID, turn.Question.ID, "这一步为什么")
+	got, err := h.svc.EditAndResend(q.ID, turn.Question.ID, "这一步为什么", h.streamID)
 	if err != nil {
 		t.Fatalf("EditAndResend: %v", err)
 	}

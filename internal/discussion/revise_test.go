@@ -31,7 +31,7 @@ func TestRegenerateReplacesTheAnswer(t *testing.T) {
 	turn := h.ask(t, q.ID, "这步为什么")
 	oldReply := turn.Reply.ID
 
-	got, err := h.svc.Regenerate(q.ID, oldReply)
+	got, err := h.svc.Regenerate(q.ID, oldReply, h.streamID)
 	if err != nil {
 		t.Fatalf("Regenerate: %v", err)
 	}
@@ -69,7 +69,7 @@ func TestRegenerateAsksWithTheConversationUpToTheQuestion(t *testing.T) {
 	h.ask(t, q.ID, "第一问")
 	second := h.ask(t, q.ID, "第二问")
 
-	if _, err := h.svc.Regenerate(q.ID, second.Reply.ID); err != nil {
+	if _, err := h.svc.Regenerate(q.ID, second.Reply.ID, h.streamID); err != nil {
 		t.Fatalf("Regenerate: %v", err)
 	}
 
@@ -100,7 +100,7 @@ func TestRegenerateKeepsTheAnswerWhenTheModelFails(t *testing.T) {
 	turn := h.ask(t, q.ID, "这步为什么")
 	h.fake.ChatErr = errors.New("网络不通")
 
-	if _, err := h.svc.Regenerate(q.ID, turn.Reply.ID); err == nil {
+	if _, err := h.svc.Regenerate(q.ID, turn.Reply.ID, h.streamID); err == nil {
 		t.Fatal("想要一个错，拿到 nil")
 	}
 
@@ -140,7 +140,7 @@ func TestRegenerateRejectsAnythingButTheLastAnswer(t *testing.T) {
 		{"不存在的 id", 9999, discussion.ErrNoSuchMessage},
 	}
 	for _, c := range cases {
-		if _, err := h.svc.Regenerate(q.ID, c.id); !errors.Is(err, c.want) {
+		if _, err := h.svc.Regenerate(q.ID, c.id, h.streamID); !errors.Is(err, c.want) {
 			t.Errorf("%s: err = %v，想要 %v", c.name, err, c.want)
 		}
 	}
@@ -163,10 +163,10 @@ func TestRegenerateOnEmptyDiscussion(t *testing.T) {
 	h := newHarness(t, "不该被问到")
 	q := h.addQuestion(t, 0x65)
 
-	if _, err := h.svc.Regenerate(q.ID, 1); !errors.Is(err, discussion.ErrNoSuchMessage) {
+	if _, err := h.svc.Regenerate(q.ID, 1, h.streamID); !errors.Is(err, discussion.ErrNoSuchMessage) {
 		t.Errorf("err = %v，想要 ErrNoSuchMessage", err)
 	}
-	if _, err := h.svc.Regenerate(9999, 1); !errors.Is(err, library.ErrNotFound) {
+	if _, err := h.svc.Regenerate(9999, 1, h.streamID); !errors.Is(err, library.ErrNotFound) {
 		t.Errorf("题不存在时 err = %v，想要 library.ErrNotFound", err)
 	}
 	if n := h.fake.ChatCount(); n != 0 {
@@ -184,7 +184,7 @@ func TestEditAndResendReplacesTheMessageAndDropsTheTail(t *testing.T) {
 	first := h.ask(t, q.ID, "第一问")
 	h.ask(t, q.ID, "第二问")
 
-	got, err := h.svc.EditAndResend(q.ID, first.Question.ID, "改过的第一问")
+	got, err := h.svc.EditAndResend(q.ID, first.Question.ID, "改过的第一问", h.streamID)
 	if err != nil {
 		t.Fatalf("EditAndResend: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestEditAndResendKeepsTheNewTextWhenTheModelFails(t *testing.T) {
 	h.ask(t, q.ID, "第二问")
 
 	h.fake.ChatErr = errors.New("网络不通")
-	if _, err := h.svc.EditAndResend(q.ID, first.Question.ID, "改过的第一问"); err == nil {
+	if _, err := h.svc.EditAndResend(q.ID, first.Question.ID, "改过的第一问", h.streamID); err == nil {
 		t.Fatal("想要一个错，拿到 nil")
 	}
 
@@ -286,7 +286,7 @@ func TestEditAndResendRejectsBadTargets(t *testing.T) {
 		{"空话", turn.Question.ID, "   ", discussion.ErrEmptyMessage},
 	}
 	for _, c := range cases {
-		if _, err := h.svc.EditAndResend(q.ID, c.id, c.text); !errors.Is(err, c.want) {
+		if _, err := h.svc.EditAndResend(q.ID, c.id, c.text, h.streamID); !errors.Is(err, c.want) {
 			t.Errorf("%s: err = %v，想要 %v", c.name, err, c.want)
 		}
 	}
@@ -302,7 +302,7 @@ func TestEditAndResendRejectsBadTargets(t *testing.T) {
 	}
 
 	// 题不存在：写操作的规矩是 ErrNotFound，而不是一个悄悄成功的空操作。
-	if _, err := h.svc.EditAndResend(9999, 1, "随便"); !errors.Is(err, library.ErrNotFound) {
+	if _, err := h.svc.EditAndResend(9999, 1, "随便", h.streamID); !errors.Is(err, library.ErrNotFound) {
 		t.Errorf("题不存在时 err = %v，想要 library.ErrNotFound", err)
 	}
 }
@@ -313,7 +313,7 @@ func TestEditAndResendCanBeFollowedByAnotherAsk(t *testing.T) {
 	q := h.addQuestion(t, 0x6a)
 
 	first := h.ask(t, q.ID, "第一问")
-	if _, err := h.svc.EditAndResend(q.ID, first.Question.ID, "改过的第一问"); err != nil {
+	if _, err := h.svc.EditAndResend(q.ID, first.Question.ID, "改过的第一问", h.streamID); err != nil {
 		t.Fatalf("EditAndResend: %v", err)
 	}
 	h.ask(t, q.ID, "第二问")

@@ -43,9 +43,13 @@ import * as $models from "./models.js";
  * 
  * 题不存在返回 library.ErrNotFound；没配 VLM 返回 ErrNotConfigured；网络与凭据的问题
  * 由 provider 原样报上来。
+ * 
+ * streamID 是**前端给这次调用编的号**（见 events.go 的 StreamDelta.StreamID）：
+ * 这一次调用期间播出去的每一片都带着它，前端按它筛出自己那一次的。
+ * 传空串就是不要流式 —— 那时这一条路与从前一模一样：等整条回来再返回。
  */
-export function Ask(questionID: number, history: $models.Message[] | null): $CancellablePromise<$models.Reply> {
-    return $Call.ByID(1424447240, questionID, history);
+export function Ask(questionID: number, history: $models.Message[] | null, streamID: string): $CancellablePromise<$models.Reply> {
+    return $Call.ByID(1424447240, questionID, history, streamID);
 }
 
 /**
@@ -73,6 +77,27 @@ export function AskText(system: string, user: string): $CancellablePromise<$mode
  */
 export function Config(): $CancellablePromise<$models.ConfigView> {
     return $Call.ByID(2355078181);
+}
+
+/**
+ * Models 拿**盘上那份配置叠加这份补丁**，去服务方要一次模型清单。
+ * 
+ * 它是两件事共用的那一次请求：设置页的「校验模型」按钮，以及两个模型名下拉的数据来源。
+ * 共用在这里说得通 —— 两件事问的是同一个问题：这个端点、这份凭据，服务方认不认。
+ * 而且它是**最省**的一次请求：一个 token 都不生成（见 deepseek.go 的 Models）。
+ * 
+ * 三个规矩：
+ * 
+ *   - **不落盘**。补丁只用于这一次请求。用户点「校验」时顺手把它存下去，
+ *     一个打错的地址就会把那份能用的配置顶掉 —— 而校验的意义恰恰是「先试试」。
+ *     想存是 SetConfig 那一步的事，界面上的「保存」按钮走的就是它。
+ *   - 只验端点与凭据（validateEndpoint），**不要求模型名** —— 它就是为了挑模型名才发的。
+ *   - 凭据只出不进：回来的只有模型名，补丁里的 key 不会被带出来（更不会进日志或报错）。
+ * 
+ * 验到了什么、没验到什么，写在 deepseek.go 的 Models 上 —— 那段话就是界面要照实说的。
+ */
+export function Models(patch: $models.Config): $CancellablePromise<string[] | null> {
+    return $Call.ByID(1305307189, patch);
 }
 
 /**

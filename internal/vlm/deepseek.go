@@ -1,6 +1,7 @@
 package vlm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/base64"
@@ -48,13 +49,20 @@ func NewDeepSeek(cfg Config) (*DeepSeek, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
-	c := cfg.normalized()
+	return newDeepSeek(cfg.normalized()), nil
+}
+
+// newDeepSeek 按一份**已经收拾干净**的配置造 provider，不替调用方验配置。
+//
+// 单独留这么一条是因为 Models 那一次请求只认端点与凭据（见 validateEndpoint）：
+// 它恰恰是**为了挑模型名**才发出去的，拿「缺 vision_model」把它挡下来就成了先有鸡后有蛋。
+func newDeepSeek(c Config) *DeepSeek {
 	return &DeepSeek{
 		baseURL: c.BaseURL,
 		apiKey:  c.APIKey,
 		detail:  c.detailOrDefault(),
 		http:    &http.Client{Timeout: requestTimeout},
-	}, nil
+	}
 }
 
 // Upload 把一张图交给 Files API，返回可跨请求复用的引用（形如 file-api-xxxxxxxx）。
@@ -117,34 +125,14 @@ func (d *DeepSeek) Upload(ctx context.Context, img Image) (string, error) {
 
 // Chat 发一次对话。
 func (d *DeepSeek) Chat(ctx context.Context, req Request) (Reply, error) {
-	if strings.TrimSpace(req.Model) == "" {
-		// 走到这里说明配置缺项从 Validate 那儿漏过去了。宁可当场报清楚，
-		// 也不要让服务方替我们挑一个默认模型 —— 那正是「不得硬编码模型 ID」要防的事。
-		return Reply{}, fmt.Errorf("%w: 这次请求没给模型名", ErrNotConfigured)
-	}
-
-	payload := chatRequest{Model: req.Model, Messages: d.messages(req)}
-	if req.JSON {
-		// 打标签那条路径要的就是它：回答得能直接解析成结构化标签。
-		payload.ResponseFormat = &responseFormat{Type: "json_object"}
-	}
-	payload.Tools = wireTools(req.Tools)
-
-	raw, err := json.Marshal(payload)
+	raw, err := d.chatBody(req, false)
 	if err != nil {
-		return Reply{}, fmt.Errorf("VLM: 组装对话报文: %w", err)
+		return Reply{}, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, d.baseURL+"/chat/completions", bytes.NewReader(raw))
+	resp, err := d.post(ctx, raw)
 	if err != nil {
-		return Reply{}, fmt.Errorf("VLM: 建对话请求: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	d.authorize(httpReq)
-
-	resp, err := d.http.Do(httpReq)
-	if err != nil {
-		return Reply{}, fmt.Errorf("VLM: 调用模型: %w", err)
+		return Reply{}, err
 	}
 	defer resp.Body.Close()
 
@@ -172,6 +160,126 @@ func (d *DeepSeek) Chat(ctx context.Context, req Request) (Reply, error) {
 		})
 	}
 	return reply, nil
+}
+
+// ChatStream 发一次对话，边收边把分片交给 onDelta，返回**拼好的整条**。
+//
+// 契约（SSE 的行格式、[DONE]、思考模式下 reasoning 一起流）写在 stream.go 的说明里，
+// 实现按它写：分片先并进本地缓冲，再原样交出去 —— 返回的 Reply 就是那几个缓冲拼出来的，
+// 于是「分片拼起来等于整条」不是一句承诺，而是同一个变量。
+//
+// 失败一律**原样报上去**（不在这里回落）：回落那件事的归属是调用方（ChatStreaming），
+// 因为只有它知道「这一路上还有没有非流式那条退路」。
+func (d *DeepSeek) ChatStream(ctx context.Context, req Request, onDelta Sink) (Reply, error) {
+	raw, err := d.chatBody(req, true)
+	if err != nil {
+		return Reply{}, err
+	}
+
+	resp, err := d.post(ctx, raw)
+	if err != nil {
+		return Reply{}, err
+	}
+	defer resp.Body.Close()
+
+	return readStream(resp.Body, onDelta)
+}
+
+// Models 要一次服务方的模型清单（GET /models）。
+//
+// 这是「校验配置」与「模型下拉」两件事共同的那一次请求，也是**最省**的一次：
+// 它一个 token 都不生成（服务方按接口调用计数，不按 token 计费）。
+//
+// 它验到的只有两件事：**端点通、凭据被认**。验不到的多着呢，别把它当体检报告：
+//   - 验不到视觉模型能不能读图 —— 那要真发一张图过去；
+//   - 验不到某个模型名存在 —— 清单里的名字随时会变，而用户填的那个可能与清单无关
+//     （清单为空的原因也可能是服务方那一侧就没实现这个端点）。
+func (d *DeepSeek) Models(ctx context.Context) ([]string, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, d.baseURL+"/models", nil)
+	if err != nil {
+		return nil, fmt.Errorf("VLM: 建取模型清单的请求: %w", err)
+	}
+	d.authorize(req)
+
+	resp, err := d.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("VLM: 取模型清单: %w", err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := readBody(resp, "取模型清单")
+	if err != nil {
+		return nil, err
+	}
+
+	// 回应的形状（官方文档：object 恒为 "list"，data 里每一项是 {id, object, owned_by}）。
+	// 只取 id —— 其余两项在这里没有用处。
+	var out struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return nil, fmt.Errorf("VLM: 取模型清单: 回应不是预期的 JSON: %w", err)
+	}
+
+	ids := make([]string, 0, len(out.Data))
+	for _, m := range out.Data {
+		if id := strings.TrimSpace(m.ID); id != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids, nil
+}
+
+// chatBody 拼一次对话的报文。stream 为真时服务方回 SSE（见 ChatStream）。
+func (d *DeepSeek) chatBody(req Request, stream bool) ([]byte, error) {
+	if strings.TrimSpace(req.Model) == "" {
+		// 走到这里说明配置缺项从 Validate 那儿漏过去了。宁可当场报清楚，
+		// 也不要让服务方替我们挑一个默认模型 —— 那正是「不得硬编码模型 ID」要防的事。
+		return nil, fmt.Errorf("%w: 这次请求没给模型名", ErrNotConfigured)
+	}
+
+	payload := chatRequest{Model: req.Model, Messages: d.messages(req), Stream: stream}
+	if req.JSON {
+		// 打标签那条路径要的就是它：回答得能直接解析成结构化标签。
+		payload.ResponseFormat = &responseFormat{Type: "json_object"}
+	}
+	payload.Tools = wireTools(req.Tools)
+
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("VLM: 组装对话报文: %w", err)
+	}
+	return raw, nil
+}
+
+// post 把一份报文发到 /chat/completions，拿回 2xx 的回应。
+//
+// 非 2xx 在这里就地变成错误：**流式那条路也一样** —— 那时服务方回的是一整条 JSON 报错，
+// 不是 SSE，交给读流的那段代码去解析只会得到一句「不是预期的 JSON」，把真正的原因盖掉。
+func (d *DeepSeek) post(ctx context.Context, body []byte) (*http.Response, error) {
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, d.baseURL+"/chat/completions", bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("VLM: 建对话请求: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+	d.authorize(httpReq)
+
+	resp, err := d.http.Do(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("VLM: 调用模型: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		// readBody 在非 2xx 时必然返回一个错（里面带着服务方的原话）。
+		if _, rerr := readBody(resp, "调用模型"); rerr != nil {
+			resp.Body.Close()
+			return nil, rerr
+		}
+		resp.Body.Close()
+		return nil, fmt.Errorf("VLM: 调用模型: 服务方返回 %s", resp.Status)
+	}
+	return resp, nil
 }
 
 // messages 把本包的 Request 摊成线上的消息数组。
@@ -308,8 +416,10 @@ func extOf(mime string) string {
 // 线上报文的形状。字段名照服务方文档抄，别顺手改。
 
 type chatRequest struct {
-	Model          string          `json:"model"`
-	Messages       []chatMessage   `json:"messages"`
+	Model    string        `json:"model"`
+	Messages []chatMessage `json:"messages"`
+	// Stream 为真时服务方回 SSE（text/event-stream）而不是一整条 JSON，见 ChatStream / readStream。
+	Stream         bool            `json:"stream,omitempty"`
 	ResponseFormat *responseFormat `json:"response_format,omitempty"`
 	// 没有 tool_choice：有工具时服务方默认就是 auto，而 required / 指定函数在思考模式下
 	// 会被 400 拒掉（官方文档），所以这个旋钮根本不接出来。
@@ -376,6 +486,157 @@ type chatResponse struct {
 			ToolCalls        []toolCallWire `json:"tool_calls"`
 		} `json:"message"`
 	} `json:"choices"`
+}
+
+// 流式那条路的报文形状（stream:true）。与上面非流式的差别只有一处：
+// 内容在 choices[0].delta 上，而且**一片只有一点点**。
+type streamChunk struct {
+	Choices []struct {
+		Delta struct {
+			Content          string       `json:"content"`
+			ReasoningContent string       `json:"reasoning_content"`
+			ToolCalls        []streamCall `json:"tool_calls"`
+		} `json:"delta"`
+	} `json:"choices"`
+}
+
+// streamCall 是一片工具调用碎片。第一片带 id / type / function.name，
+// 之后几片只给 function.arguments 的一段；前后片靠 index 认亲（见 absorbing.callAt）。
+type streamCall struct {
+	Index    int    `json:"index"`
+	ID       string `json:"id"`
+	Type     string `json:"type"`
+	Function struct {
+		Name      string `json:"name"`
+		Arguments string `json:"arguments"`
+	} `json:"function"`
+}
+
+// doneMarker 是服务方给的结束标记，单独一行 `data: [DONE]`。
+const doneMarker = "[DONE]"
+
+// absorbing 攒一次流式的中间结果。
+//
+// 正文与思考过程各攒一份、**不合并** —— 官方那份流式样例就是这么做的，
+// 于是 Reply 上那两个字段与非流式那条路一一对应。
+type absorbing struct {
+	text      strings.Builder
+	reasoning strings.Builder
+	calls     []toolCallWire
+}
+
+// absorb 把一片增量并进缓冲，并把这一片**新增的内容**原样交给 onDelta。
+//
+// 交出去的与并进去的是同一份字符串：返回值（整条）与播给界面的分片因此天然一致，
+// 不需要另外去保证「分片拼起来等于整条」。
+func (a *absorbing) absorb(c streamChunk, onDelta Sink) {
+	if len(c.Choices) == 0 {
+		// 只带 usage 之类的一片，没有正文。
+		return
+	}
+	d := c.Choices[0].Delta // 与 Chat 一样：只看第一条 choice（n 从没传过，恒为一条）
+
+	for _, tc := range d.ToolCalls {
+		a.callAt(tc)
+	}
+	if d.Content != "" {
+		a.text.WriteString(d.Content)
+	}
+	if d.ReasoningContent != "" {
+		a.reasoning.WriteString(d.ReasoningContent)
+	}
+	if onDelta != nil && (d.Content != "" || d.ReasoningContent != "") {
+		onDelta(Delta{Text: d.Content, Reasoning: d.ReasoningContent})
+	}
+}
+
+// callAt 把一片工具调用碎片并到它该在的位置上。
+//
+// index 是碎片自带的位次（官方规定要有它）。id、函数名只有第一片带，
+// 后面几片同样会带 index、但是空的 —— 所以「非空才覆盖」，
+// 而 arguments 是**要拼起来**的那一段，只有它用 += 。
+func (a *absorbing) callAt(f streamCall) {
+	i := f.Index
+	for len(a.calls) <= i {
+		a.calls = append(a.calls, toolCallWire{})
+	}
+	c := &a.calls[i]
+	if f.ID != "" {
+		c.ID = f.ID
+	}
+	if f.Type != "" {
+		c.Type = f.Type
+	}
+	if f.Function.Name != "" {
+		c.Function.Name = f.Function.Name
+	}
+	c.Function.Arguments += f.Function.Arguments
+}
+
+// sseData 从 SSE 的一行里取出 data 的载荷。
+//
+// 行格式是 SSE 通用那套：前缀 `data:`，冒号后那一个空格是**可选**的装饰；
+// 以 `:` 开头的是注释行（服务方拿它做 keep-alive），`event:` / `id:` / `retry:`
+// 这几样这里一个都不用 —— 官方只发 data 行。
+// ok 为假就是「这一行不是一条增量」，跳过即可。
+func sseData(line string) (string, bool) {
+	if !strings.HasPrefix(line, "data:") {
+		return "", false
+	}
+	return strings.TrimSpace(line[len("data:"):]), true
+}
+
+// readStream 把一次流式回应的正文读到底：边读边播，返回拼好的整条。
+//
+// 结束条件是**读到 `data: [DONE]`**，只靠「连接关了」不算数：
+// 中间隔一层代理或者网络抖一下时，半截回应也可能干干净净地结束。
+// 认了它就会把一段半截话当成整条答案落库（Discussion 里模型回答最后是落库的），
+// 而那是一句错话留在用户的错题本里 —— 比多花一次请求贵得多。
+// 于是这里宁可报错，交给 ChatStreaming 去回落。代价写在它那儿：重发一次完整请求。
+//
+// 出错时返回的 Reply 是空的：已经流出去的那半截由调用方在收尾时整条替换掉，
+// 不是靠这里把半截拼回去（见 Discussion.svelte 的 live 那一块）。
+func readStream(body io.Reader, onDelta Sink) (Reply, error) {
+	var acc absorbing
+	done := false
+
+	sc := bufio.NewScanner(body)
+	// 默认上限 64KB 不够用：一片特别长的正文、或者一张工具调用表的分片都可能超过它，
+	// 撞上了 Scanner 会拿一个 ErrTooLong 把整次流式判死。
+	sc.Buffer(make([]byte, 0, 64*1024), maxReplyBytes)
+
+	for sc.Scan() {
+		payload, ok := sseData(sc.Text())
+		if !ok {
+			continue
+		}
+		if payload == doneMarker {
+			done = true
+			break
+		}
+		var chunk streamChunk
+		if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+			return Reply{}, fmt.Errorf("VLM: 调用模型: 流里的分片不是预期的 JSON: %w", err)
+		}
+		acc.absorb(chunk, onDelta)
+	}
+	if err := sc.Err(); err != nil {
+		return Reply{}, fmt.Errorf("VLM: 调用模型: 读流: %w", err)
+	}
+	if !done {
+		return Reply{}, errors.New("VLM: 调用模型: 流没读到结束标记就断了")
+	}
+
+	reply := Reply{Text: acc.text.String(), Reasoning: acc.reasoning.String()}
+	// 与非流式那条路一样：原样搬，不在这里解释 arguments（见 ToolCall.Arguments）。
+	for _, c := range acc.calls {
+		reply.ToolCalls = append(reply.ToolCalls, ToolCall{
+			ID:        c.ID,
+			Name:      c.Function.Name,
+			Arguments: c.Function.Arguments,
+		})
+	}
+	return reply, nil
 }
 
 // wireTools 把本包的工具清单摊成线上的 tools 数组；没有工具时返回 nil（omitempty 就不发）。

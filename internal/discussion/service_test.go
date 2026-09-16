@@ -59,6 +59,14 @@ type harness struct {
 	fake   *vlm.Fake
 	clock  *clock
 	cfg    string
+
+	// streamID 是这一套里问出去时带的流式号（h.ask 用它）。
+	//
+	// **默认给一个非空值**：于是这份测试跑的整条路都是**流式**那条 —— 假 provider 把
+	// 这一轮该说的话当成一片播出去（见 vlm.Fake.ChatStream），返回值与非流式一字不差，
+	// 所以下面那些断言一个字都不用改。想跑非流式就把它置空，两条路写进库里的东西是否
+	// 一样由 TestStreamedAndPlainAskPersistTheSameThing 对着比。
+	streamID string
 }
 
 // newHarness 搭一套，模型的回答取 replies（用完最后一条就一直重复它）。
@@ -107,6 +115,8 @@ func newHarnessAt(t *testing.T, dbPath string, replies ...string) *harness {
 		fake:   fake,
 		clock:  clk,
 		cfg:    cfgPath,
+		// 见 harness.streamID：默认就走流式那条路。
+		streamID: "test-stream",
 	}
 }
 
@@ -164,7 +174,7 @@ func (h *harness) history(t *testing.T, id int64) []discussion.Message {
 func (h *harness) ask(t *testing.T, id int64, text string) discussion.Turn {
 	t.Helper()
 
-	turn, err := h.svc.Ask(id, text)
+	turn, err := h.svc.Ask(id, text, h.streamID)
 	if err != nil {
 		t.Fatalf("Ask(%d, %q): %v", id, text, err)
 	}
@@ -246,7 +256,7 @@ func TestAskKeepsTheQuestionWhenTheModelFails(t *testing.T) {
 	h.fake.ChatErr = errors.New("网络不通")
 	q := h.addQuestion(t, 0x11)
 
-	if _, err := h.svc.Ask(q.ID, "我错在哪"); err == nil {
+	if _, err := h.svc.Ask(q.ID, "我错在哪", h.streamID); err == nil {
 		t.Fatal("想要一个错，拿到 nil")
 	}
 
@@ -265,7 +275,7 @@ func TestAskWithoutConfig(t *testing.T) {
 	unconfigured := vlm.NewService(h.libSvc, h.tags, filepath.Join(t.TempDir(), "vlm.json"))
 	svc := discussion.NewService(h.lib, unconfigured)
 
-	if _, err := svc.Ask(q.ID, "这步为什么"); !errors.Is(err, vlm.ErrNotConfigured) {
+	if _, err := svc.Ask(q.ID, "这步为什么", ""); !errors.Is(err, vlm.ErrNotConfigured) {
 		t.Fatalf("err = %v，想要 ErrNotConfigured", err)
 	}
 	if got := texts(h.history(t, q.ID)); !slices.Equal(got, []string{"user:这步为什么"}) {
@@ -278,7 +288,7 @@ func TestAskRejectsEmptyReply(t *testing.T) {
 	h := newHarness(t, "   \n  ")
 	q := h.addQuestion(t, 0x13)
 
-	if _, err := h.svc.Ask(q.ID, "这步为什么"); !errors.Is(err, discussion.ErrEmptyReply) {
+	if _, err := h.svc.Ask(q.ID, "这步为什么", h.streamID); !errors.Is(err, discussion.ErrEmptyReply) {
 		t.Fatalf("err = %v，想要 ErrEmptyReply", err)
 	}
 	if got := texts(h.history(t, q.ID)); !slices.Equal(got, []string{"user:这步为什么"}) {
@@ -292,7 +302,7 @@ func TestAskRejectsEmptyText(t *testing.T) {
 	q := h.addQuestion(t, 0x14)
 
 	for _, blank := range []string{"", "   ", "\n\t"} {
-		if _, err := h.svc.Ask(q.ID, blank); !errors.Is(err, discussion.ErrEmptyMessage) {
+		if _, err := h.svc.Ask(q.ID, blank, h.streamID); !errors.Is(err, discussion.ErrEmptyMessage) {
 			t.Errorf("Ask(%q) 返回 %v，想要 ErrEmptyMessage", blank, err)
 		}
 	}
@@ -309,7 +319,7 @@ func TestAskRejectsEmptyText(t *testing.T) {
 func TestAskUnknownQuestion(t *testing.T) {
 	h := newHarness(t, "不该被问到")
 
-	if _, err := h.svc.Ask(9999, "这步为什么"); !errors.Is(err, library.ErrNotFound) {
+	if _, err := h.svc.Ask(9999, "这步为什么", h.streamID); !errors.Is(err, library.ErrNotFound) {
 		t.Fatalf("err = %v，想要 library.ErrNotFound", err)
 	}
 	if n := h.fake.ChatCount(); n != 0 {

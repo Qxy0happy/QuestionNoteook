@@ -1,7 +1,6 @@
 package vlm
 
 import (
-	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -26,7 +25,11 @@ import (
 //
 // 题不存在返回 library.ErrNotFound；没配 VLM 返回 ErrNotConfigured；网络与凭据的问题
 // 由 provider 原样报上来。
-func (s *Service) Ask(questionID int64, history []Message) (Reply, error) {
+//
+// streamID 是**前端给这次调用编的号**（见 events.go 的 StreamDelta.StreamID）：
+// 这一次调用期间播出去的每一片都带着它，前端按它筛出自己那一次的。
+// 传空串就是不要流式 —— 那时这一条路与从前一模一样：等整条回来再返回。
+func (s *Service) Ask(questionID int64, history []Message, streamID string) (Reply, error) {
 	provider, cfg, err := s.current()
 	if err != nil {
 		return Reply{}, err
@@ -44,13 +47,15 @@ func (s *Service) Ask(questionID int64, history []Message) (Reply, error) {
 		return Reply{}, err
 	}
 
-	return provider.Chat(context.Background(), Request{
+	// 走 s.chat 而不是 provider.Chat：流式与回落那条规矩只有那一个出处。
+	// 返回值仍然是**整条**回答 —— 流的那些分片是给界面看着玩的，落库用的是这一个。
+	return s.chat(provider, Request{
 		// 讨论必然带图，所以走视觉那一路（见 Config.modelFor）。
 		Model:  cfg.modelFor(true),
 		System: discussPrompt,
 		// JSON 不打开：讨论要的是一段人话，不是能解析的结构。
 		Messages: attachImages(history, images),
-	})
+	}, streamID)
 }
 
 // discussPrompt 是讨论用的系统提示词。

@@ -67,6 +67,27 @@ type Config struct {
 // Validate 检查这份配置能不能拿去调模型。缺哪一项、错在哪都在这句话里说清楚，
 // 而不是等到发请求时收到一个 401 再回头猜。
 func (c Config) Validate() error {
+	if err := c.validateEndpoint(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(c.VisionModel) == "" {
+		return fmt.Errorf("%w: 缺 vision_model", ErrNotConfigured)
+	}
+	switch c.Detail {
+	case "", DetailLow, DetailHigh, DetailOriginal, DetailAuto:
+	default:
+		return fmt.Errorf("VLM: detail 只能是 low / high / original / auto，给的是 %q", c.Detail)
+	}
+	return nil
+}
+
+// validateEndpoint 只检查「够不够把一次请求发出去」：接入点像个地址、凭据在。
+//
+// 从 Validate 里单拆出来，是给 Models 那一次请求用的（见 Service.Models）：
+// 它恰恰是**为了挑模型名**才发出去的，要求先有模型名就成了先有鸡后有蛋。
+// 这里不查模型名，别的什么都不放松 —— 端点与凭据仍然是必须的，那两样缺了
+// 连一句像样的报错都拿不到。
+func (c Config) validateEndpoint() error {
 	if strings.TrimSpace(c.BaseURL) == "" {
 		return fmt.Errorf("%w: 缺 base_url", ErrNotConfigured)
 	}
@@ -74,16 +95,8 @@ func (c Config) Validate() error {
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return fmt.Errorf("VLM: base_url 不是个完整的地址: %q", c.BaseURL)
 	}
-	if strings.TrimSpace(c.VisionModel) == "" {
-		return fmt.Errorf("%w: 缺 vision_model", ErrNotConfigured)
-	}
 	if strings.TrimSpace(c.APIKey) == "" {
 		return fmt.Errorf("%w: 缺 api_key", ErrNotConfigured)
-	}
-	switch c.Detail {
-	case "", DetailLow, DetailHigh, DetailOriginal, DetailAuto:
-	default:
-		return fmt.Errorf("VLM: detail 只能是 low / high / original / auto，给的是 %q", c.Detail)
 	}
 	return nil
 }

@@ -50,6 +50,15 @@ type harness struct {
 // newHarness 搭一套，provider 用假实现，回答取 replies（用完最后一条就一直重复它）。
 func newHarness(t *testing.T, replies ...string) *harness {
 	t.Helper()
+	return newHarnessWith(t, nil, replies...)
+}
+
+// newHarnessWith 与 newHarness 同一套，只是能再补几个构造选项。
+//
+// 留这个口子是给流式那几条测试的：它们要把「播出一片」那一步换成往切片里写
+// （真实的播法是往 Wails 发事件，测试里没有应用、也不该起一个，见 vlm/events.go）。
+func newHarnessWith(t *testing.T, opts []vlm.Option, replies ...string) *harness {
+	t.Helper()
 	root := t.TempDir()
 
 	cards, err := capture.NewStore(filepath.Join(root, "cards"))
@@ -71,8 +80,9 @@ func newHarness(t *testing.T, replies ...string) *harness {
 	}
 
 	fake := vlm.NewFake(replies...)
+	all := append([]vlm.Option{vlm.WithProvider(fake)}, opts...)
 	return &harness{
-		svc:     vlm.NewService(libSvc, tagSvc, cfgPath, vlm.WithProvider(fake)),
+		svc:     vlm.NewService(libSvc, tagSvc, cfgPath, all...),
 		lib:     libSvc,
 		tags:    tagSvc,
 		cards:   cards,

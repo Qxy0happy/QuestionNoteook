@@ -27,7 +27,9 @@ import "strings"
 // 只认最后一条记录、而且它得是模型的回答，位置不对返回 ErrNotRegeneratable。
 // 「重说中间某一条回答」听着像同一件事，其实要顺手丢掉它后面那几轮对话 —— 那是用户
 // 没要求过的删除，不该藏在「重新生成」这个动作里。要那个效果走 EditAndResend。
-func (s *Service) Regenerate(questionID, messageID int64) ([]Message, error) {
+//
+// streamID 与 Ask 那个是同一个东西：这一轮边生成边显示用的。落库的仍然是返回值里那一句。
+func (s *Service) Regenerate(questionID, messageID int64, streamID string) ([]Message, error) {
 	// 与 Ask 同一条规矩：写一个不存在的 id 应当收到 ErrNotFound，而不是一个
 	// 「悄悄什么都没发生」的成功。
 	if _, err := s.questions.GetQuestion(questionID); err != nil {
@@ -51,7 +53,7 @@ func (s *Service) Regenerate(questionID, messageID int64) ([]Message, error) {
 
 	// 上下文砍到那条回答为止（**不含**它）：这次就是要它重新说。
 	// 于是最后一条正好是那条提问，满足 Asker 对 history 形状的要求。
-	reply, err := s.asker.Ask(questionID, wireHistory(history[:at]))
+	reply, err := s.asker.Ask(questionID, wireHistory(history[:at]), streamID)
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +80,9 @@ func (s *Service) Regenerate(questionID, messageID int64) ([]Message, error) {
 // 说在动手之前（见 Discussion.svelte 的编辑态）。
 //
 // 只能改**用户自己**说的那句；模型那条走 Regenerate。
-func (s *Service) EditAndResend(questionID, messageID int64, text string) ([]Message, error) {
+//
+// streamID 与 Ask 那个是同一个东西：这一轮边生成边显示用的。
+func (s *Service) EditAndResend(questionID, messageID int64, text, streamID string) ([]Message, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return nil, ErrEmptyMessage
@@ -111,7 +115,7 @@ func (s *Service) EditAndResend(questionID, messageID int64, text string) ([]Mes
 	if err != nil {
 		return nil, err
 	}
-	reply, err := s.asker.Ask(questionID, wireHistory(updated))
+	reply, err := s.asker.Ask(questionID, wireHistory(updated), streamID)
 	if err != nil {
 		return nil, err
 	}

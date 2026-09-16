@@ -34,6 +34,12 @@ type Service struct {
 	// fixed 非空时永远用它，不看配置建的那个。测试与「没有 key 也想把界面点通」用它。
 	fixed Provider
 
+	// emit 把一片增量播给界面（讨论页与 agent 页一边生成一边显示那件事）。
+	//
+	// 它是个**字段**而不是直接调 EmitDelta：本包的业务逻辑因此一行都不依赖 Wails，
+	// 测试里换成一个往切片里写的函数，整条流式路径照样跑，一条事件都不发（见 events.go）。
+	emit func(streamID string, d Delta)
+
 	mu       sync.Mutex
 	loaded   bool
 	loadErr  error
@@ -51,6 +57,18 @@ type Option func(*Service)
 // 注入的 provider 是彻底顶替，见 current。
 func WithProvider(p Provider) Option { return func(s *Service) { s.fixed = p } }
 
+// WithEmitter 换掉「把一片增量播给界面」那一步。默认是 EmitDelta（走 Wails 事件）。
+//
+// 传 nil 等于没传：没有播的出口时，NewSink 会给一个 nil，于是整条路**压根不走流式** ——
+// 那正是非流式那条退路（见 ChatStreaming）。
+func WithEmitter(emit func(streamID string, d Delta)) Option {
+	return func(s *Service) {
+		if emit != nil {
+			s.emit = emit
+		}
+	}
+}
+
 // NewService 接上错题库、标签树与配置文件的落点。
 //
 // 三个都是接线时必须给的，没有默认值 —— 尤其配置路径：它由应用私有目录推出来，
@@ -64,6 +82,7 @@ func NewService(questions *library.Service, tagSvc *tags.Service, configPath str
 		tags:       tagSvc,
 		configPath: configPath,
 		cachePath:  filepath.Join(filepath.Dir(configPath), fileCacheName),
+		emit:       EmitDelta,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -265,7 +284,68 @@ func (s *Service) SetConfig(patch Config) error {
 	return s.loadErr
 }
 
+// ModelLister 是「能报出服务方那边有哪些模型」这一面。只有取清单那一次请求用它 ——
+// 与 Streamer 一样是个小一号的接口，Provider 上不再长东西。
+type ModelLister interface {
+	Models(ctx context.Context) ([]string, error)
+}
+
+// Models 拿**盘上那份配置叠加这份补丁**，去服务方要一次模型清单。
+//
+// 它是两件事共用的那一次请求：设置页的「校验模型」按钮，以及两个模型名下拉的数据来源。
+// 共用在这里说得通 —— 两件事问的是同一个问题：这个端点、这份凭据，服务方认不认。
+// 而且它是**最省**的一次请求：一个 token 都不生成（见 deepseek.go 的 Models）。
+//
+// 三个规矩：
+//
+//   - **不落盘**。补丁只用于这一次请求。用户点「校验」时顺手把它存下去，
+//     一个打错的地址就会把那份能用的配置顶掉 —— 而校验的意义恰恰是「先试试」。
+//     想存是 SetConfig 那一步的事，界面上的「保存」按钮走的就是它。
+//   - 只验端点与凭据（validateEndpoint），**不要求模型名** —— 它就是为了挑模型名才发的。
+//   - 凭据只出不进：回来的只有模型名，补丁里的 key 不会被带出来（更不会进日志或报错）。
+//
+// 验到了什么、没验到什么，写在 deepseek.go 的 Models 上 —— 那段话就是界面要照实说的。
+func (s *Service) Models(patch Config) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// 拿盘上那份当底，与 SetConfig 同一个道理：界面拿不到凭据的值，
+	// 它只能把用户这次改的项传进来，剩下的靠这一份兜着。
+	// 盘上那份读坏了（不是「还没配」）就当它不存在，只看补丁 —— 与 SetConfig 同一套规矩。
+	if err := s.ensureLocked(); err != nil && !errors.Is(err, ErrNotConfigured) {
+		s.cfg = Config{}
+	}
+
+	merged := s.cfg.withOverrides(patch)
+	if err := merged.validateEndpoint(); err != nil {
+		return nil, err
+	}
+
+	if s.fixed != nil {
+		// 注入的 provider（测试、或者没有 key 的那种跑法）。上面那句照样要过：
+		// 「你填的这份看起来能不能用」是界面上的规矩，不该因为换了个 provider 就变。
+		lister, ok := s.fixed.(ModelLister)
+		if !ok {
+			return nil, errors.New("VLM: 这个 provider 不支持取模型清单")
+		}
+		return lister.Models(context.Background())
+	}
+
+	// 这里不能走 NewDeepSeek：它要求一份完整配置（缺 vision_model 就报错），
+	// 而这一次请求恰恰是**为了挑模型名**才发的（先有鸡后有蛋，见 newDeepSeek）。
+	return newDeepSeek(merged).Models(context.Background())
+}
+
 // ── 内部 ──
+
+// chat 发一次对话：能流就流，流不动静默回落到非流式（那条规矩的出处见 ChatStreaming）。
+//
+// 本包里「provider、streamID、播出去的那一步」凑到一起只有这一处 ——
+// 讨论与 agent 两条路都从这儿过。streamID 为空（前端没给）时连流都不试：
+// 没有 id，界面认不出哪些分片是自己的（见 NewSink）。
+func (s *Service) chat(p Chatter, req Request, streamID string) (Reply, error) {
+	return ChatStreaming(context.Background(), p, req, NewSink(streamID, s.emit))
+}
 
 // current 返回这次该用的 provider 与配置。第一次用到时才读盘（见 NewService）。
 func (s *Service) current() (Provider, Config, error) {

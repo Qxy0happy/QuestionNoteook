@@ -52,6 +52,18 @@
     Reasoning: string;
   };
 
+  /**
+   * 流式增量那一条事件的载荷（Go 侧 vlm.StreamDelta）。
+   *
+   * 事件名与这三个字段名都与 Go 侧逐字相同 —— 它是 emit 出去的一份 JSON，
+   * 不经过生成的绑定，所以这儿的类型只能自己写一份。
+   */
+  type StreamDelta = { stream_id: string; kind: string; text: string };
+
+  // 与 Go 侧 vlm.KindText / KindReasoning 逐字相同（见 discussion 那边同一段注释）。
+  const KIND_TEXT = 'text';
+  const KIND_REASONING = 'reasoning';
+
   // 例子问题：点一下只把字**填进**输入框，不替他发出去 —— 发不发是他的决定。
   // （讨论页那几个预设是「点了就发」，那儿合适是因为问题短且不用改；这儿问的是整库范围的
   // 事，用户多半想按自己的情况改两个字再问。）
@@ -68,6 +80,21 @@
   let error = $state('');
   // 正在等回答的那一句。乐观上屏：用户打的字立刻出现，不等模型（与讨论那边同一个做法）。
   let pending = $state('');
+
+  // ── 流式 ──
+  //
+  // 与讨论页那一套一模一样（那边写得详细，见 Discussion.svelte）：号由前端编、随调用传进去，
+  // Go 把每一片都打上它，这里按它筛；分片只活在**这一次调用期间**，返回时整块换成落库/上屏
+  // 的那一条。为什么必须整块换掉：流到一半断掉时 Go 会回落重发，已经流出去的那半截不作数
+  // （见 vlm.ChatStreaming）。
+  //
+  // agent 这一路**每一轮都往同一个号上播**（工具调用循环对用户来说就是同一轮）——
+  // 于是中途几轮的思考过程会接在一起，与最终 Answer.Reasoning 那种「几段拼起来」一个形状。
+  let liveId = $state('');
+  let live = $state<{ text: string; reasoning: string } | null>(null);
+  const liveActive = $derived(
+    live !== null && (live.text !== '' || live.reasoning !== ''),
+  );
   // 变了就让待批准清单重读一遍：agent 刚提的新东西得当场出现（与拆标签之前同一个接法）。
   let pendingKey = $state(0);
   let logEl = $state<HTMLElement | null>(null);
@@ -102,8 +129,12 @@
     pending = q;
     draft = '';
 
+    const stream = newStreamId();
+    liveId = stream;
+    live = { text: '', reasoning: '' };
+
     try {
-      const a = await Agent.Ask(q);
+      const a = await Agent.Ask(q, stream);
       // 上屏用的是 Go 回显的那句（a.Question，那边 TrimSpace 过），不是本地这一串 ——
       // 屏幕上看到的与库里那份是同一个东西（与讨论那边同一个做法）。
       const mine: Turn = {
@@ -123,9 +154,11 @@
         Problem: a.Problem,
         Reasoning: a.Reasoning ?? '',
       };
-      // 撤掉「等回答」那一句与挂上这一轮要在同一次 flush 里做完：分两次写会在中间闪出一屏
-      // 两个「我」。
+      // 撤掉「等回答」那一句、收掉流式那一份、挂上这一轮，要在同一次 flush 里做完：
+      // 分两次写会在中间闪出一屏两个「我」，或者同一句话出现两遍（一份半截的、一份完整的）。
       pending = '';
+      live = null;
+      liveId = '';
       messages = [...messages, mine, reply];
       // 无论这一轮提没提改动都 +1 —— 重读一次是最省事的「与库对齐」。
       pendingKey += 1;
@@ -137,6 +170,9 @@
       messages = [...messages, { ID: nextID++, Role: 'me', Text: q, Proposals: 0, Problem: '', Reasoning: '' }];
     } finally {
       busy = false;
+      // 收尾一定收掉：留着一个半截的 live 与上面挂上去的那条会并排显示。
+      live = null;
+      liveId = '';
     }
   }
 
@@ -231,8 +267,37 @@
   onMount(() => {
     // 宿主那条监听不在这儿开（它是接线的事，main.go 里开一次），这里只订阅。
     const off = Events.On('common:keyboard', (event) => applyKeyboard(event.data));
-    return () => off();
+    // 流式增量那条事件（Go 侧 vlm.StreamEvent 发出来的，事件名逐字相同）。
+    const offDelta = Events.On('vlm:delta', (event) => applyDelta(event.data));
+    return () => {
+      off();
+      offDelta();
+    };
   });
+
+  // newStreamId 编一个这次调用用的号（与讨论页那份是同一个做法，理由写在那儿）。
+  function newStreamId(): string {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  // applyDelta 收一片流式增量：先按号筛（不是这一次调用的一律丢掉），再按 kind 归位。
+  // 思考过程进上面那一块、正文进气泡 —— Go 侧把它们分成两条事件发，正是因为界面上是两块地方。
+  function applyDelta(data: unknown): void {
+    const d = data as StreamDelta | null;
+    if (!d || liveId === '' || d.stream_id !== liveId) return;
+    const text = typeof d.text === 'string' ? d.text : '';
+    if (text === '') return;
+    if (live === null) live = { text: '', reasoning: '' };
+    if (d.kind === KIND_REASONING) live.reasoning += text;
+    else if (d.kind === KIND_TEXT) live.text += text;
+    // 这一页的滚动是 $effect 管的（它盯的是 messages 与 pending）：流式的字不长在上面，
+    // 所以这里自己推一下 —— 否则字在涨、屏幕不动，看起来像卡住了。
+    const el = logEl;
+    if (el && el.scrollHeight > 0) el.scrollTop = el.scrollHeight;
+  }
 </script>
 
 <div class="chat" style="padding-bottom: {kbInset}px">
@@ -262,6 +327,20 @@
 
     {#each messages as m, i (m.ID)}
       <div class="line" class:mine={m.Role === 'me'}>
+        <!-- agent 这条回答的思考过程：**在回答上面**、**默认收着**，点一下才铺开。
+             它与讨论那边是同一块东西、同一套理由（见 Discussion.svelte 里那段注释）：
+             摆上面是「先过程后结论」，收着是因为它是「它在干活」的凭据、不是回答本身，
+             字体是虚的（见 .think 的字号与颜色）。
+             多出来的一层：agent 一次提问要往返好几轮（查标签、查题、再回答），
+             这里摆的是**几轮拼起来的**那一段 —— 拼法见 Go 侧 Answer.Reasoning。
+             它也不落库，而且这边连对话本身都不落库：切走再回来（组件被卸载）就没了。 -->
+        {#if m.Role === 'agent' && m.Reasoning}
+          <details class="think">
+            <summary class="think-head">思考过程</summary>
+            <div class="think-body"><Markdown text={m.Reasoning} /></div>
+          </details>
+        {/if}
+
         <div class="bubble">
           <!-- 两边都过 markdown + KaTeX：模型几乎必然吐公式，而用户自己也可能写 LaTeX
                （与讨论那边同一条规矩、同一个组件）。 -->
@@ -277,19 +356,6 @@
             <p class="banner warn">{m.Problem}</p>
           {/if}
         </div>
-
-        <!-- agent 这条回答的思考过程：**默认收着**，点一下才铺开。
-             它与讨论那边是同一块东西、同一套理由（见 Discussion.svelte 里那段注释）：
-             它是「它在干活」的凭据，不是回答本身，一直摊着会把回答挤出屏幕。
-             多出来的一层：agent 一次提问要往返好几轮（查标签、查题、再回答），
-             这里摆的是**几轮拼起来的**那一段 —— 拼法见 Go 侧 Answer.Reasoning。
-             它也不落库，而且这边连对话本身都不落库：切走再回来（组件被卸载）就没了。 -->
-        {#if m.Role === 'agent' && m.Reasoning}
-          <details class="think">
-            <summary class="think-head">思考过程</summary>
-            <div class="think-body"><Markdown text={m.Reasoning} /></div>
-          </details>
-        {/if}
       </div>
 
       {#if i === proposalSlot}
@@ -305,7 +371,25 @@
       </div>
     {/if}
 
-    {#if busy}
+    <!-- 正在流的那一份（与讨论那边同一个做法，见 Discussion.svelte 里那一段）。
+         思考过程摊开着：它正在流，收起来就等于看不见它在想什么。
+         一次提问里每一轮都往这儿接，所以「查了什么、想了什么」是一路接着下来的。 -->
+    {#if liveActive && live}
+      <div class="line">
+        {#if live.reasoning}
+          <details class="think" open>
+            <summary class="think-head">思考过程</summary>
+            <div class="think-body"><Markdown text={live.reasoning} /></div>
+          </details>
+        {/if}
+        {#if live.text}
+          <div class="bubble"><Markdown text={live.text} /></div>
+        {/if}
+      </div>
+    {/if}
+
+    <!-- 一个字都还没来的时候才是这句（agent 这一路还要先查数据，这一段有时不短）。 -->
+    {#if busy && !liveActive}
       <p class="thinking">正在查…</p>
     {/if}
 
@@ -441,14 +525,18 @@
   }
 
   /* 思考过程那一块：写法与讨论页那份一样（同一块东西在两个页面上该长一个样）。
-     它在气泡**外面** —— 气泡是 pre-wrap 的，半截缩进会被它放大。 */
+     它在气泡**外面** —— 气泡是 pre-wrap 的，半截缩进会被它放大；
+     位置在气泡**上面**（模板里的先后顺序就是这个意思）：先过程后结论。 */
   .think {
     /* 与 .bubble 同一条理由（见 Discussion.svelte 里 .bubble 那段）：.line 是 column flex，
        里面的宽内容（表格、pre、KaTeX 的盒子）会把 min-content 顶上去、一路撑出屏幕。
        上限钉在 .line 的宽度上，超宽的东西改在它们自己内部滚。 */
     max-width: 100%;
+    /* 虚化：比正文（.bubble 是 0.92rem）小一号、颜色更淡。用字号与前景色而不是 opacity —
+       opacity 会把折叠条、边框、背景一起变淡，看起来像「这一块不能用」而不是「这是注脚」
+       （与讨论页那条同一个选择）。 */
     font-size: 0.8rem;
-    color: rgba(244, 246, 251, 0.6);
+    color: rgba(244, 246, 251, 0.5);
   }
   .think-head {
     /* 整行都给点：只让「思考过程」那几个字可点的话，手指很难点中。

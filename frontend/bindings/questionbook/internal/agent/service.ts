@@ -23,8 +23,12 @@ import * as $models from "./models.js";
  * **只读 + 只提议**：这一步不会改动任何正式数据。它会往 pending_changes 里写行
  * （那是「提议」这个动作本身），但那些行要等用户逐条点头才生效。
  * 
+ * streamID 由界面编好传进来，只为让这一轮的回答边生成边显示（见 vlm.StreamDelta）；
+ * 传空串就是不流式、等整条回来。它不影响返回的东西 —— 界面拿去做最终显示与落点判断的
+ * 永远是下面那个 Answer，流出去的分片只是给眼睛看的。
+ * 
  * 没配 VLM 返回 vlm.ErrNotConfigured；问的是空的返回 ErrEmptyQuestion。
  */
-export function Ask(question: string): $CancellablePromise<$models.Answer> {
-    return $Call.ByID(822749896, question);
+export function Ask(question: string, streamID: string): $CancellablePromise<$models.Answer> {
+    return $Call.ByID(822749896, question, streamID);
 }

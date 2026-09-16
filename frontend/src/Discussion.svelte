@@ -50,6 +50,22 @@
     y: number;
   };
 
+  /** Turn 是刚过去的一轮（Go 侧 discussion.Turn）：问出去的那句 + 模型答的那句。 */
+  type Turn = { Question: ChatMessage; Reply: ChatMessage };
+
+  /**
+   * 流式增量那一条事件的载荷（Go 侧 vlm.StreamDelta）。
+   *
+   * 事件名与这三个字段名都与 Go 侧逐字相同 —— 它是 emit 出去的一份 JSON，
+   * 不经过生成的绑定，所以这儿的类型只能自己写一份。
+   */
+  type StreamDelta = { stream_id: string; kind: string; text: string };
+
+  // 与 Go 侧 vlm.KindText / KindReasoning 逐字相同。两路分开发（见 vlm/events.go），
+  // 界面上它们也是两块地方：思考过程折在上面、回答在气泡里。
+  const KIND_TEXT = 'text';
+  const KIND_REASONING = 'reasoning';
+
   interface Props {
     /** 讨论挂在哪道错题上。null = 还没有题（队列空着的时候），此时整块不出现。 */
     questionId: number | null;
@@ -66,6 +82,25 @@
   // 正在等回答的那一句。乐观显示：用户打的字立刻上屏，不等模型
   // （Go 侧也确实先把它落库了，见 Discussion.Ask）。
   let pending = $state('');
+
+  // ── 流式 ──
+  //
+  // liveId 是**这一次调用**的号（下面 newStreamId 编的，随调用交给 Go）。
+  // live 是这一次调用期间已经收到的分片：两路各自攒一份。
+  //
+  // 为什么号由前端编而不是 Go 返回一个：Ask 这类调用只到最后才返回，而分片在这中间就来了 ——
+  // 界面得先有个办法认出「哪些分片是我这一次的」。前端编一个、传进去、Go 给每一片打上它，
+  // 界面按它筛。这样不必多一次往返，也不必等 Go 先给个回执。
+  //
+  // 它只是**这一次调用期间**的显示。调用一返回（成功或失败）就清掉，屏幕上只剩落库回来的
+  // 那一条 —— 「最终显示与库里那条对齐」就是这么做出来的（Go 侧 ChatStreaming 的说明里写着
+  // 为什么必须整条替换：流到一半断掉时会回落重发，已经流出去的那半截不作数）。
+  let liveId = $state('');
+  let live = $state<{ text: string; reasoning: string } | null>(null);
+  // 有没有东西可显示（两路都空时还是那句「正在想…」）。
+  const liveActive = $derived(
+    live !== null && (live.text !== '' || live.reasoning !== ''),
+  );
 
   // 一闪而过的回执（「已复制」这类）。它不是错误，所以不跟 error 抢那一行。
   let notice = $state('');
@@ -110,8 +145,42 @@
     // 宿主那条键盘监听**不在这儿开**：它是接线的事，已经在 main.go 里打开一次
     // （早先临时挪到过讨论包里，分层不对，已挪走）。这里只订阅事件。
     const off = Events.On('common:keyboard', (event) => applyKeyboard(event.data));
-    return () => off();
+    // 流式增量那条事件（Go 侧 vlm.StreamEvent 发出来的，事件名逐字相同）。
+    const offDelta = Events.On('vlm:delta', (event) => applyDelta(event.data));
+    return () => {
+      off();
+      offDelta();
+    };
   });
+
+  // newStreamId 编一个这次调用用的号。
+  //
+  // 只要求「这一次调用期间不跟别的撞上」，所以时间戳加一段随机数就够（它不会被存下来、
+  // 也不会跨设备比较）。randomUUID 要安全上下文，WebView 里未必有 —— 留一条老路。
+  function newStreamId(): string {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+
+  // applyDelta 收一片流式增量。
+  //
+  // 先按号筛：不是这一次调用的（上一次没散尽的、别处发的）一律丢掉。号是自己编的，
+  // 所以只在**这一次调用**期间认它 —— 调用一返回 liveId 就清空了。
+  //
+  // 两路各归各位：思考过程进上面那折起来的一块，正文进气泡。Go 侧把它们分成两条事件发，
+  // 正是因为它们在界面上是两块地方（见 vlm/events.go）。
+  function applyDelta(data: unknown): void {
+    const d = data as StreamDelta | null;
+    if (!d || liveId === '' || d.stream_id !== liveId) return;
+    const text = typeof d.text === 'string' ? d.text : '';
+    if (text === '') return;
+    if (live === null) live = { text: '', reasoning: '' };
+    if (d.kind === KIND_REASONING) live.reasoning += text;
+    else if (d.kind === KIND_TEXT) live.text += text;
+    scrollToEnd();
+  }
 
   // applyKeyboard 收宿主那份键盘报告。
   //
@@ -172,6 +241,9 @@
     messages = [];
     error = '';
     pending = '';
+    // 流到一半的那一份也是「某一道题的这一次调用」：换了题它指的就不是同一件事了。
+    live = null;
+    liveId = '';
     // 菜单、选中、编辑态都是「某一条消息」上的东西：换了题它们指的就不是同一条了。
     menu = null;
     pickId = null;
@@ -236,8 +308,12 @@
     pending = body;
     if (draft.trim() === body) draft = ''; // 按预设问的，别顺手清掉用户打了一半的字
 
+    const stream = newStreamId();
+    liveId = stream;
+    live = { text: '', reasoning: '' };
+
     try {
-      const turn = await Discussion.Ask(id, body);
+      const turn = await Discussion.Ask(id, body, stream);
       // 这中间换了题：结果丢掉（它已经在库里了，回到那道题还看得到）。
       if (questionId !== id) return;
       messages = [...messages, turn.Question, turn.Reply];
@@ -252,6 +328,10 @@
       if (questionId === id) {
         busy = false;
         pending = '';
+        // 流出去的那一份在这里收掉：上面已经把落库回来的整条挂上去了，留着它屏幕上就是
+        // 同一句话出现两遍（一份半截的、一份完整的）。
+        live = null;
+        liveId = '';
       }
     }
   }
@@ -282,8 +362,11 @@
 
     busy = true;
     error = '';
+    const stream = newStreamId();
+    liveId = stream;
+    live = { text: '', reasoning: '' };
     try {
-      messages = (await Discussion.EditAndResend(id, target.id, body)) ?? [];
+      messages = (await Discussion.EditAndResend(id, target.id, body, stream)) ?? [];
       editing = null;
       draft = '';
       scrollToEnd();
@@ -300,7 +383,11 @@
       const lastUser = [...fresh].reverse().find((m) => m.Role === 'user');
       editing = lastUser ? { id: lastUser.ID } : null;
     } finally {
-      if (questionId === id) busy = false;
+      if (questionId === id) {
+        busy = false;
+        live = null;
+        liveId = '';
+      }
     }
   }
 
@@ -314,8 +401,11 @@
 
     busy = true;
     error = '';
+    const stream = newStreamId();
+    liveId = stream;
+    live = { text: '', reasoning: '' };
     try {
-      messages = (await Discussion.Regenerate(id, target.ID)) ?? [];
+      messages = (await Discussion.Regenerate(id, target.ID, stream)) ?? [];
     } catch (err) {
       if (questionId !== id) return;
       error = errorMessage(err);
@@ -323,7 +413,11 @@
       // 重新生成是先问、后换，问失败时库里一个字节都没动，屏幕上这份就是库里那份；
       // 编辑重发是先落库、后问，失败时库里已经换了，得回库对齐。
     } finally {
-      if (questionId === id) busy = false;
+      if (questionId === id) {
+        busy = false;
+        live = null;
+        liveId = '';
+      }
     }
   }
 
@@ -521,16 +615,16 @@
               onpointerleave={pressEnd}
               oncontextmenu={(e) => onMessageContext(e, m, m.ID === lastId)}
             >
-              <!-- 两边都过 markdown + KaTeX：模型几乎必然吐公式，而用户自己也可能写 LaTeX。 -->
-              <div class="bubble" class:pick={pickId === m.ID} id={bubbleId(m.ID)}>
-                <Markdown text={m.Text} />
-              </div>
-              <time class="at">{timeText(m.CreatedAt)}</time>
+              <!-- 模型这条回答的思考过程：**在回答上面**，默认收着，点一下才铺开。
+                   为什么摆在上面：它是得出这个回答的过程，先看过程、再看结论，读起来是一条线；
+                   摆在底下时它挡在回答与下一句提问之间，读的人得先跳过它才接得上下文。
 
-              <!-- 模型这条回答的思考过程：**默认收着**，点一下才铺开。
                    为什么收着：它是「它确实在干活」的凭据，不是回答本身 —— 一直摊着会把回答
                    挤出屏幕，而多数时候用户要的就是回答。也不是拿来替「正在想…」那句等待提示的：
-                   那句是等的时候看的，这块是回来之后才有的（见下面 busy 那一段）。
+                   那句是等的时候看的，这块是回来之后才有的（见下面 live / busy 那两段）。
+                   字体是虚的（见 .think 的字号与颜色），比正文小一号、也不那么亮 ——
+                   它是给回答做注脚的，不该比回答本身还抢眼。
+
                    为什么只有模型那条有、而且不落库：见 Go 侧 discussion.Message.Reasoning。
                    这里如实写下一个看得见的后果 —— 换一道题再回来、或者失败后重读历史
                    （loadHistory），这一块就不在了。那是有意的，不是这里漏了。 -->
@@ -540,6 +634,12 @@
                   <div class="think-body"><Markdown text={m.Reasoning} /></div>
                 </details>
               {/if}
+
+              <!-- 两边都过 markdown + KaTeX：模型几乎必然吐公式，而用户自己也可能写 LaTeX。 -->
+              <div class="bubble" class:pick={pickId === m.ID} id={bubbleId(m.ID)}>
+                <Markdown text={m.Text} />
+              </div>
+              <time class="at">{timeText(m.CreatedAt)}</time>
             </div>
           {/each}
 
@@ -549,7 +649,28 @@
             </div>
           {/if}
 
-          {#if busy}
+          <!-- 正在流的那一份。它是**这一次调用期间**的显示，两路各流各的：
+               思考过程在上面（摊开着 —— 它正在流，收起来就等于看不见「它在想什么」），
+               回答在下面那个气泡里。调用一返回就整块换成上面落库回来的那一条。
+               思考过程这块在收尾后会变成落库那条的样子（默认收着）—— 「最终与库里那条对齐」
+               就是这个意思，不是这里忘了留 open。 -->
+          {#if liveActive && live}
+            <div class="line">
+              {#if live.reasoning}
+                <details class="think" open>
+                  <summary class="think-head">思考过程</summary>
+                  <div class="think-body"><Markdown text={live.reasoning} /></div>
+                </details>
+              {/if}
+              {#if live.text}
+                <div class="bubble"><Markdown text={live.text} /></div>
+              {/if}
+            </div>
+          {/if}
+
+          <!-- 一个字都还没来的时候才是这句。它只在「等第一片」那一小段里出现 ——
+               流起来之后上面那一块就是「正在想」本身（它带着已经写出来的那些字）。 -->
+          {#if busy && !liveActive}
             <p class="thinking">正在想…</p>
           {/if}
         </div>
@@ -756,14 +877,19 @@
   }
 
   /* 思考过程那一块：在气泡**外面**（气泡是 pre-wrap 的，半截缩进会被它放大），
-     所以这里自己排版。默认收着 = 不给 open 属性，交给 details 自己的行为。 */
+     所以这里自己排版。默认收着 = 不给 open 属性，交给 details 自己的行为
+     （正在流的那一份才带 open，见模板里那一段）。
+     位置在气泡**上面**（模板里的先后顺序就是这个意思）：它是回答的来路，先过程后结论。 */
   .think {
     /* 与 .bubble 同一条理由：.line 是 column flex，块在交叉轴上是 fit-content，
        里面的宽内容（表格、pre）会把 min-content 顶上去、一路撑出屏幕。
        上限钉在 .line 的宽度上，超宽的东西改在它们自己内部滚（Markdown.svelte 里有各条）。 */
     max-width: 100%;
+    /* 虚化：比正文（.bubble 是 0.92rem）小一号、颜色更淡。
+       用字号与前景色而不是 opacity —— opacity 会把折叠条、边框、背景一起变淡，
+       那看起来像「这一块不能用」，而不是「这一块是注脚」。 */
     font-size: 0.8rem;
-    color: rgba(244, 246, 251, 0.6);
+    color: rgba(244, 246, 251, 0.5);
   }
   .think-head {
     /* 整行都给点：只让「思考过程」那几个字可点的话，手指很难点中。

@@ -32,6 +32,10 @@ const maxProposals = 20
 // 没有 —— 工具调用的报文里不带图（官方文档里图片只能挂在 user 消息上，而工具结果是
 // role:"tool" 的消息）—— 所以这一层**不需要**上传能力，也就不该拿着它。
 // 接口小一号，「能做的事」就少一档。
+//
+// 流式在这里是**可选**的：实现再多满足一个 vlm.Streamer（vlm.DeepSeek 就满足），
+// 这一轮就能边生成边显示；不满足或者流不动，vlm.ChatStreaming 会**静默回落**到这里
+// 这一面。所以接口上不逼着谁去实现它 —— 那是「能流就流」，不是「必须能流」。
 type Model interface {
 	Chat(ctx context.Context, req vlm.Request) (vlm.Reply, error)
 }
@@ -64,6 +68,11 @@ type Service struct {
 	// 拿两轮就把「用尽之后会怎样」跑到。
 	maxRounds int
 
+	// emit 把一片增量播给界面。默认是 vlm.EmitDelta（走 Wails 事件，见 vlm/events.go）；
+	// 做成字段是为了让测试换成一个往切片里写的函数，一条事件都不发。
+	// 播这件事只有一处实现（vlm 包）—— agent 这侧不自己造一条播法。
+	emit func(streamID string, d vlm.Delta)
+
 	// 配置按需读、读一次就记住：与 vlm.Service 同一套（一个坏文件不该每次点一下重读一遍）。
 	mu        sync.Mutex
 	loaded    bool
@@ -79,6 +88,17 @@ type Option func(*Service)
 //
 // 真实接线不传这一项 —— 模型按配置现建（见 current）。
 func WithModel(m Model) Option { return func(s *Service) { s.fixed = m } }
+
+// WithEmitter 换掉「把一片增量播给界面」那一步。默认是 vlm.EmitDelta（走 Wails 事件）。
+//
+// 传 nil 等于没传：没有播的出口时整条路**压根不走流式**（见 vlm.NewSink）。
+func WithEmitter(emit func(streamID string, d vlm.Delta)) Option {
+	return func(s *Service) {
+		if emit != nil {
+			s.emit = emit
+		}
+	}
+}
 
 // WithMaxRounds 换掉回合上限。只有测试会用。
 func WithMaxRounds(n int) Option {
@@ -99,6 +119,7 @@ func NewService(reader Reader, proposer Proposer, configPath string, opts ...Opt
 		proposer:   proposer,
 		configPath: configPath,
 		maxRounds:  maxToolRounds,
+		emit:       vlm.EmitDelta,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -154,8 +175,12 @@ type Answer struct {
 // **只读 + 只提议**：这一步不会改动任何正式数据。它会往 pending_changes 里写行
 // （那是「提议」这个动作本身），但那些行要等用户逐条点头才生效。
 //
+// streamID 由界面编好传进来，只为让这一轮的回答边生成边显示（见 vlm.StreamDelta）；
+// 传空串就是不流式、等整条回来。它不影响返回的东西 —— 界面拿去做最终显示与落点判断的
+// 永远是下面那个 Answer，流出去的分片只是给眼睛看的。
+//
 // 没配 VLM 返回 vlm.ErrNotConfigured；问的是空的返回 ErrEmptyQuestion。
-func (s *Service) Ask(question string) (Answer, error) {
+func (s *Service) Ask(question string, streamID string) (Answer, error) {
 	question = strings.TrimSpace(question)
 	if question == "" {
 		return Answer{}, ErrEmptyQuestion
@@ -174,6 +199,11 @@ func (s *Service) Ask(question string) (Answer, error) {
 		// 非 nil 起步：一次没提议的提问也要给前端一个 []，而不是 null
 		//（与 List、ReviewHistory 那边同一条规矩）。
 		proposals: []PendingChange{},
+		// 一次提问里的**每一轮**都往同一个 streamID 上播：界面上那一块是「这一轮回答
+		// 正在生成」，而工具调用循环对用户来说就是同一轮（他不会知道里面往返了几次）。
+		// 于是中途几轮的分片会接在前面的后面 —— 与 Answer.Reasoning 那种「几段拼起来」
+		// 是一样的形状，收起展开的也是同一块地方。
+		sink: vlm.NewSink(streamID, s.emit),
 	}
 	text, problem, rounds, err := r.converse(context.Background(), question, s.roundLimit())
 	if err != nil {
@@ -280,6 +310,10 @@ type runner struct {
 	proposer Proposer
 	snap     *snapshot
 
+	// sink 把每一轮的增量播到界面上。它是 nil（界面没给 streamID、或者没有播的出口）时
+	// 整条路走非流式 —— 那正是 vlm.ChatStreaming 认的那个开关。
+	sink vlm.Sink
+
 	proposals []PendingChange
 
 	// reasoning 是每一轮的思考过程，按轮次先后攒着（Ask 最后拼成 Answer.Reasoning）。
@@ -318,7 +352,10 @@ func (r *runner) converse(ctx context.Context, question string, maxRounds int) (
 			req.Tools = toolDecls()
 		}
 
-		reply, err := r.model.Chat(ctx, req)
+		// 走 ChatStreaming 而不是 r.model.Chat：能流就流，流不动静默回落 ——
+		// 那条规矩只有一个出处（vlm.ChatStreaming），agent 这边不另立一套。
+		// 返回的仍然是**整条**回答：下面攒的 reasoning、wrap、以及最后的 Answer 用的都是它。
+		reply, err := vlm.ChatStreaming(ctx, r.model, req, r.sink)
 		if err != nil {
 			return "", "", round, err
 		}

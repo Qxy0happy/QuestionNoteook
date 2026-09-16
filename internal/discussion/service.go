@@ -69,7 +69,11 @@ func (s *Service) History(questionID int64) ([]Message, error) {
 //   - 题不存在 → library.ErrNotFound
 //   - 模型没回答（空文本）→ ErrEmptyReply
 //   - 没配 VLM / 网络 / 服务方报错 → provider 那边原样冒上来
-func (s *Service) Ask(questionID int64, text string) (Turn, error) {
+//
+// streamID 由界面编好传进来，只为让**这一轮**的回答边生成边显示（见 Asker.Ask）。
+// 它不落库：拿回答那一句话永远来自下面那个返回值（流式的分片只是给眼睛看的），
+// 于是「流式与非流式最终写进库里的东西一样」这件事，在这里就是同一行代码在写。
+func (s *Service) Ask(questionID int64, text string, streamID string) (Turn, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
 		return Turn{}, ErrEmptyMessage
@@ -92,7 +96,7 @@ func (s *Service) Ask(questionID int64, text string) (Turn, error) {
 		return Turn{}, err
 	}
 
-	reply, err := s.asker.Ask(questionID, wireHistory(history))
+	reply, err := s.asker.Ask(questionID, wireHistory(history), streamID)
 	if err != nil {
 		return Turn{}, err
 	}

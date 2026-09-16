@@ -63,9 +63,81 @@
     tag_prompt: '',
   });
 
+  // ── 常用端点 ──
+  //
+  // 现在只有一条（点一下就把它填进「接口地址」），因为这是已知的那一个。
+  // 这一块是给以后留的位置：再添一家就在这个数组里加一条，别的代码一行都不用动。
+  // 但**不为一个还不存在的第二家先造抽象** —— 一份配置表就是它需要的全部形状。
+  const ENDPOINT_PRESETS: { name: string; base_url: string }[] = [
+    { name: 'DeepSeek', base_url: 'https://api.deepseek.com' },
+  ];
+
+  // ── 模型清单（服务方暴露的那个接口）──
+  //
+  // 模型名**不硬编码**（ADR-0005）：能问服务方要清单就问它要，问不到就手填。
+  let models = $state<string[]>([]);
+  // 手填开关：清单拉到了也可以改成手打。它挡的是「清单不全」那件事 ——
+  // 服务方那边列出来的名字未必是你想填的那个，锁死在清单上就成了另一种硬编码。
+  let manualModels = $state(false);
+  let checking = $state(false);
+  // 校验的结果：ok 为真时是一句「通了」，假时是服务方的原话（或者本地那句缺项的报错）。
+  let checkResult = $state<{ ok: boolean; text: string } | null>(null);
+
   function errorMessage(err: unknown): string {
     return err instanceof Error ? err.message : String(err);
   }
+
+  // fetchModels 顺手把清单拉来填下拉。失败**不留痕迹**：拉不到就退回手填，
+  // 而模型名本来就能手打（见下面那两个字段的写法）。它不是用户按下的那一次 ——
+  // 用户按下的那一次是 checkModel，那次会照实说结果。
+  async function fetchModels(): Promise<void> {
+    try {
+      models = (await VLM.Models(patch)) ?? [];
+    } catch {
+      models = [];
+    }
+  }
+
+  // checkModel 用**当前这份配置**真发一次请求，把结果说给用户听。
+  //
+  // 走的是 GET /models（服务方暴露的那个接口，见 Go 侧 vlm.Service.Models）：
+  // 这是最省的一次 —— 它一个 token 都不生成。顺带把清单收下来填上面那两个下拉。
+  //
+  // 它验到了什么、没验到什么，下面那行字里写着（那段话与 Go 侧 deepseek.go 的 Models
+  // 是同一份），别在这里把它说成「配置没问题」—— 它验不了那个。
+  async function checkModel() {
+    if (checking) return;
+    checking = true;
+    checkResult = null;
+    try {
+      const list = (await VLM.Models(patch)) ?? [];
+      models = list;
+      checkResult = {
+        ok: true,
+        text: `通了：这个地址、这份凭据服务方认。它报了 ${list.length} 个模型名。`,
+      };
+    } catch (err) {
+      // 凭据**不会**出现在这句话里：它只进不出（Go 侧报错里也不带它，见 vlm 的 authorize）。
+      models = [];
+      checkResult = { ok: false, text: errorMessage(err) };
+    } finally {
+      checking = false;
+    }
+  }
+
+  // modelChoices 给下拉用的选项：清单里的全部 + **当前填的那个**。
+  //
+  // 为什么非要带上当前值：清单是服务方**那一刻**的样子，而配置里存的名字可能已经不在里面了
+  // （也正是 ADR-0005 不许硬编码模型 ID 的那个理由）。不带上它，一个绑着 value 的下拉
+  // 会当场把用户原来填的名字换成清单里的第一条 —— 他什么都没动，配置却变了。
+  function modelChoices(current: string): string[] {
+    const cur = current.trim();
+    if (cur === '' || models.includes(cur)) return models;
+    return [cur, ...models];
+  }
+
+  // 用下拉还是手填：清单拉到了才给下拉（没拉到就退回手填——不能把用户锁在一个空清单上）。
+  const pickFromList = $derived(models.length > 0 && !manualModels);
 
   // ── 导出整库（票 13）──
   //
@@ -141,6 +213,10 @@
         detail: v.Detail,
       };
       error = '';
+      // 已经配好了就顺手把模型清单拉一次，好让下面两个模型名一进来就是可挑的下拉
+      // （用户来这一页十有八九是为了换模型）。**静默**：失败就是手填，不说一句废话 ——
+      // 想验配置请按「校验模型」，那一次会把结果说清楚。
+      if (v.Configured) void fetchModels();
     } catch (err) {
       error = errorMessage(err);
     } finally {
@@ -168,6 +244,8 @@
     if (saving) return;
     saving = true;
     saved = '';
+    // 上一次那句「通了」是对**旧配置**说的：这份一改，它就不再是这句话的意思了。
+    checkResult = null;
     try {
       await VLM.SetConfig(patch);
       // 提交完就把凭据从界面上抹掉：它只该存在于那一次提交里。
@@ -360,6 +438,22 @@
         />
       </label>
 
+      <!-- 常用端点：点一下就填进上面那一栏（手打一个地址很容易少一个字母）。
+           现在只有一条，见脚本里 ENDPOINT_PRESETS 那段注释。 -->
+      <div class="chips">
+        <span class="chips-label">常用端点</span>
+        {#each ENDPOINT_PRESETS as p (p.base_url)}
+          <button
+            class="chip"
+            type="button"
+            onclick={() => (patch.base_url = p.base_url)}
+            title={p.base_url}
+          >
+            {p.name}
+          </button>
+        {/each}
+      </div>
+
       <label>
         <span>API Key</span>
         <!-- 明文而不是 password：安卓上 password 会唤出**安全键盘**，它不让粘贴、也没有候选词，
@@ -377,29 +471,79 @@
         />
       </label>
 
+      <!-- 两个模型名：拉到清单就是下拉（挑一个，不必手打），拉不到就是文本框。
+           下拉的选项里**一定带上当前填的那个**，见脚本里 modelChoices 那段注释。 -->
       <label>
         <span>视觉模型</span>
-        <input
-          bind:value={patch.vision_model}
-          type="text"
-          autocapitalize="none"
-          autocorrect="off"
-          spellcheck="false"
-          placeholder="看服务方的文档，别照抄这里"
-        />
+        {#if pickFromList}
+          <select bind:value={patch.vision_model}>
+            {#each modelChoices(patch.vision_model) as id (id)}
+              <option value={id}>{id}{models.includes(id) ? '' : '（当前填的，清单里没有）'}</option>
+            {/each}
+          </select>
+        {:else}
+          <input
+            bind:value={patch.vision_model}
+            type="text"
+            autocapitalize="none"
+            autocorrect="off"
+            spellcheck="false"
+            placeholder="看服务方的文档，别照抄这里"
+          />
+        {/if}
       </label>
 
       <label>
         <span>文本模型<span class="opt">选填</span></span>
-        <input
-          bind:value={patch.text_model}
-          type="text"
-          autocapitalize="none"
-          autocorrect="off"
-          spellcheck="false"
-          placeholder="只有纯文本的活才用它"
-        />
+        {#if pickFromList}
+          <select bind:value={patch.text_model}>
+            {#each modelChoices(patch.text_model ?? '') as id (id)}
+              <option value={id}>{id}{models.includes(id) ? '' : '（当前填的，清单里没有）'}</option>
+            {/each}
+          </select>
+        {:else}
+          <input
+            bind:value={patch.text_model}
+            type="text"
+            autocapitalize="none"
+            autocorrect="off"
+            spellcheck="false"
+            placeholder="只有纯文本的活才用它"
+          />
+        {/if}
       </label>
+
+      <!-- 校验模型：拿**上面这份配置**真发一次请求，把结果说给用户听。
+           它走的是 GET /models（服务方暴露的那个接口），一个 token 都不生成 ——
+           这是能问出「端点与凭据认不认」的最省的一次调用。
+           下面那行字是**这个按钮的全部意思**，别把它读成「配置没问题」：它验不到的
+           是「这个视觉模型能不能读图」—— 那要真发一张图过去才行。 -->
+      <div class="actions">
+        <button class="pill" onclick={checkModel} disabled={checking}>
+          {checking ? '正在问服务方…' : '校验模型'}
+        </button>
+        {#if models.length > 0}
+          <label class="row inline">
+            <input type="checkbox" bind:checked={manualModels} />
+            <span class="opt">手填模型名</span>
+          </label>
+        {/if}
+      </div>
+      <p class="note">
+        校验走 GET /models，不生成 token、不花额度。它验的是**这个地址通、这份凭据被认**；
+        验不了「这个视觉模型能不能读图」（那得真发一张图过去），也验不了某个模型名一定存在 ——
+        清单是服务方那一刻的样子。校验不会保存：改了哪一项要按下面的「保存」才落盘。
+      </p>
+      {#if checkResult}
+        <p class="banner" class:ok={checkResult.ok}>{checkResult.text}</p>
+      {/if}
+      {#if models.length === 0 && checkResult?.ok}
+        <!-- 通了、但一个模型名都没报回来：清单这条路走不通，就手填（见上面那段）。
+             不把它说成失败 —— 端点与凭据确实是通的。 -->
+        <p class="banner warn">
+          它没报出任何模型名，上面两个名字请照服务方的文档手填。
+        </p>
+      {/if}
 
       <label>
         <span>图片保真<span class="opt">密集文档要用高保真</span></span>
@@ -624,6 +768,34 @@
     color: rgba(244, 246, 251, 0.35);
   }
 
+  /* 常用端点那一排：一行小标签 + 几个可点的胶囊。
+     与讨论页那排预设追问同一个长相（同一个作者、同一套配色）。 */
+  .chips {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.35rem;
+    /* 上面那条 label 是竖排的（label 的通配规则），这一排不是 label，但也要点得着。 */
+    margin-top: -0.3rem;
+  }
+  .chips-label {
+    font-size: 0.75rem;
+    color: rgba(244, 246, 251, 0.35);
+  }
+  .chip {
+    padding: 0.25rem 0.6rem;
+    border: 1px solid rgba(130, 200, 255, 0.4);
+    border-radius: 999px;
+    background: rgba(130, 200, 255, 0.1);
+    color: #9fd4ff;
+    font: inherit;
+    font-size: 0.8rem;
+    cursor: pointer;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    --wails-draggable: no-drag;
+  }
+
   input,
   select,
   textarea {
@@ -672,6 +844,12 @@
     flex-direction: row;
     align-items: center;
     gap: 0.55rem;
+  }
+  /* 挤在 .actions 那一排按钮里的那个勾选框（「手填模型名」）：宽度按内容来，
+     不能像别的 label 那样把整行占满，否则会把旁边的按钮挤扁。 */
+  label.row.inline {
+    flex: none;
+    gap: 0.35rem;
   }
 
   /* 上面那条 input, select, textarea 的通配规则是给文本框写的（宽度铺满、有边框底色）。

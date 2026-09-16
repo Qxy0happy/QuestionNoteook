@@ -61,6 +61,13 @@ type harness struct {
 	read    *store.ReadStore
 	fake    *vlm.Fake
 	clock   *clock
+
+	// streamID 是这一套里问出去时带的流式号（h.ask 用它）。
+	//
+	// **默认给一个非空值**：于是这一整份测试跑的都是**流式**那条路 —— 假 provider 把
+	// 每一轮该说的话当成一片播出来（见 vlm.Fake.ChatStream），返回值与非流式一字不差，
+	// 所以下面那些断言一个字都不用改。想跑非流式就把它置空（幂等那条路验过一次）。
+	streamID string
 }
 
 func newHarness(t *testing.T, opts ...agent.Option) *harness {
@@ -110,6 +117,8 @@ func newHarness(t *testing.T, opts ...agent.Option) *harness {
 		read:    readStore,
 		fake:    fake,
 		clock:   clk,
+		// 见 harness.streamID：默认就走流式那条路。
+		streamID: "test-stream",
 	}
 }
 
@@ -205,7 +214,7 @@ func say(text string) vlm.Reply { return vlm.Reply{Text: text} }
 // ask 问一句，失败即终止测试。
 func (h *harness) ask(t *testing.T, question string) agent.Answer {
 	t.Helper()
-	a, err := h.svc.Ask(question)
+	a, err := h.svc.Ask(question, h.streamID)
 	if err != nil {
 		t.Fatalf("Ask(%q): %v", question, err)
 	}
@@ -601,7 +610,7 @@ func TestAskRejectsEmptyQuestion(t *testing.T) {
 	h.seed(t)
 
 	for _, blank := range []string{"", "   ", "\n\t"} {
-		if _, err := h.svc.Ask(blank); !errors.Is(err, agent.ErrEmptyQuestion) {
+		if _, err := h.svc.Ask(blank, h.streamID); !errors.Is(err, agent.ErrEmptyQuestion) {
 			t.Errorf("Ask(%q) 返回 %v，想要 ErrEmptyQuestion", blank, err)
 		}
 	}
@@ -618,7 +627,7 @@ func TestAskWithoutConfig(t *testing.T) {
 	// 与 main.go 同一个形状，只是没配过：配置文件不在，也没注入模型。
 	unconfigured := agent.NewService(h.read, h.pending, filepath.Join(t.TempDir(), "vlm.json"))
 
-	if _, err := unconfigured.Ask("我有几道错题"); !errors.Is(err, vlm.ErrNotConfigured) {
+	if _, err := unconfigured.Ask("我有几道错题", ""); !errors.Is(err, vlm.ErrNotConfigured) {
 		t.Fatalf("err = %v，想要 ErrNotConfigured", err)
 	}
 }
