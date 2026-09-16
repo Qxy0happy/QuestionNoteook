@@ -11,11 +11,6 @@ export {
 } from "./models.js";
 
 export type {
-    Config,
-    ConfigView,
-    Image,
     Message,
-    ProposedTag,
-    Reply,
-    TagSuggestion
+    Turn
 } from "./models.js";

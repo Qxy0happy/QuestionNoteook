@@ -13,7 +13,7 @@ type migration struct {
 // **已经发布出去的那几条永远不要改** —— 老库只会跑比自己版本号大的那些，
 // 改了它们等于让老库和新库模式不一致。要改就追加新的一条。
 //
-// 这张表里还没有的：讨论、待批准改动。它们跟着各自的票走，各加一条迁移。
+// 这张表里还没有的：待批准改动。它跟着自己那张票走，另加一条迁移。
 var migrations = []migration{
 	{
 		version: 1,
@@ -136,6 +136,35 @@ var migrations = []migration{
 			)`,
 			// 回看一道题的复习史（票据 14 的「最近的表现」）走这条。
 			`CREATE INDEX review_logs_question_idx ON review_logs (question_id, reviewed_at DESC)`,
+		},
+	},
+	{
+		version: 4,
+		name:    "建讨论记录",
+		stmts: []string{
+			// 讨论是「与 VLM 就某道错题展开的对话」（CONTEXT.md），挂在错题上、可回看。
+			// **一行 = 讨论里的一句话**：同一道题的那些行合起来就是它的会话，
+			// 而每道题只有一条会话，所以不必再来一张会话表。
+			// 读写它的代码在 internal/discussion。
+			`CREATE TABLE discussions (
+				-- AUTOINCREMENT：一行的先后不只由时间戳决定，见下面那条索引的说明。
+				id          INTEGER PRIMARY KEY AUTOINCREMENT,
+				-- 挂在哪道错题上。题没了，它的讨论跟着走 —— 不留指向不存在错题的行。
+				question_id INTEGER NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+				-- 谁说的。取值就是 vlm.Role 的那两个（user / assistant）：它要原样进请求报文，
+				-- 中间不该隔一张对照表。
+				role        TEXT    NOT NULL CHECK (role IN ('user', 'assistant')),
+				-- 说了什么。空话不落库 —— 服务层先拦一道（空的问题根本发不出去），
+				-- schema 这里再拦一道。
+				text        TEXT    NOT NULL CHECK (text <> ''),
+				-- Unix 毫秒（UTC）—— 与 questions.created_at 同一个约定。
+				created_at  INTEGER NOT NULL
+			)`,
+			// 回看一道题的讨论只走这一条查询。尾上的 id 不是装饰：时间戳只到毫秒，
+			// 用户那句与模型答的那句往往写在同一毫秒里，只按 created_at 排的话，
+			// 同一个话题的两句话谁先谁后由 SQLite 的心情决定。id 是自增的，
+			// 谁先写的谁小 —— 用它兜底，顺序就是确定的（与 questions 那边的排序同一个道理）。
+			`CREATE INDEX discussions_question_idx ON discussions (question_id, created_at, id)`,
 		},
 	},
 }

@@ -14,6 +14,7 @@
   import { Level } from '../bindings/questionbook/internal/tags/models';
   import type { Tag } from '../bindings/questionbook/internal/tags/models';
   import AnswerBadge from './AnswerBadge.svelte';
+  import Discussion from './Discussion.svelte';
 
   let root = $state<HTMLElement | null>(null);
 
@@ -223,6 +224,14 @@
       {/if}
     </div>
 
+    {#if result}
+      <!-- 讨论夹在图与底部栏之间：面板展开时它自己长高、题图那块让位，
+           塞进底部栏会把评级条顶出屏幕。评完之后才出现 —— 就这道题提问是"做完"之后的事。 -->
+      <div class="discuss">
+        <Discussion questionId={current.Question.ID} />
+      </div>
+    {/if}
+
     <div class="foot">
       <!-- 缺答案图要在自评**之前**标出来（story 10）：评完才发现没答案可对，这一遍就白做了。 -->
       <div class="meta">
@@ -298,6 +307,13 @@
     /* 图比屏高时图自己滚，滑到头不把整页三页横滑也带走。 */
     overflow-y: auto;
     overscroll-behavior-y: contain;
+  }
+
+  /* 讨论收成一行时不该抢地方；展开的那份日志自己滚（组件里封了 40vh），
+     所以这里是 flex:0 0 auto —— 面板长高时让 .stage 让位，而不是把底部栏顶出去。 */
+  .discuss {
+    flex: 0 0 auto;
+    padding: 0 1rem;
   }
   /* 两张图都在、且屏够宽才分左右：只有一张时铺满整屏更清楚。 */
   @media (min-aspect-ratio: 1/1) {

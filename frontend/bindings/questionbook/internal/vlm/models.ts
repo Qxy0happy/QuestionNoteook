@@ -95,6 +95,49 @@ export interface ConfigView {
 }
 
 /**
+ * Image 是要交给模型看的一张图。
+ */
+export interface Image {
+    /**
+     * Hash 是这张图在本地的内容 hash（ADR-0004 的名字：图片按内容 hash 命名）。
+     * 它是「这张图传上去过没有」的键 —— 同一张题图会在打标签与讨论两条路径上反复用到，
+     * Files API 的全部意义就是别传第二遍。
+     */
+    "Hash": string;
+
+    /**
+     * Data 是图片的原始字节。这里恒为 PNG：题图落盘就是 PNG，读回来的也是 PNG。
+     */
+    "Data": string | null;
+
+    /**
+     * MIME 是它的媒体类型，形如 image/png。
+     */
+    "MIME": string;
+
+    /**
+     * FileID 非空表示这张图已经传到服务方了，这次用引用而不是内联 base64。
+     * 由调用方（Service）填：怎么拿到这个引用的（缓存命中 / 刚传的 / 传不上去）是**策略**，
+     * Provider 只负责照着它决定报文长什么样。
+     */
+    "FileID": string;
+}
+
+/**
+ * Message 是一条消息。
+ */
+export interface Message {
+    "Role": Role;
+    "Text": string;
+
+    /**
+     * Images 只能挂在 user 消息上 —— 服务方的硬约束：放进 system 或 assistant 直接 400。
+     * 类型上没拦这一条（拦了就得为每种能带图的角色各造一个类型），由 Service 拼消息时守住。
+     */
+    "Images": Image[] | null;
+}
+
+/**
  * ProposedTag 是**一条**分层标签建议：学科 > 章节 > 知识点。
  * 
  * 它还没落库。它既可能来自模型，也可能是用户在界面上改过之后的版本 ——
@@ -108,6 +151,28 @@ export interface ProposedTag {
     "Chapter": string;
     "Point": string;
 }
+
+/**
+ * Reply 是模型的一次回答。
+ */
+export interface Reply {
+    "Text": string;
+}
+
+/**
+ * Role 是一条消息的角色。取值直接就是线上报文里的样子（user / assistant / system），
+ * 不另立一套自己的枚举再到实现里翻译一遍 —— 这一层抽象要挡的差异不在这里。
+ */
+export enum Role {
+    /**
+     * The Go zero value for the underlying type of the enum.
+     */
+    $zero = "",
+
+    RoleSystem = "system",
+    RoleUser = "user",
+    RoleAssistant = "assistant",
+};
 
 /**
  * TagSuggestion 是「让 VLM 给这道题打标签」这一次的结果。

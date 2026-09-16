@@ -12,6 +12,7 @@
   import AnswerBadge from './AnswerBadge.svelte';
   import TagFilter from './TagFilter.svelte';
   import Tagging from './Tagging.svelte';
+  import Discussion from './Discussion.svelte';
 
   // 三页是同时挂载的，切到这一页才值得拉一次数据。
   // 题库页发起的「补拍答案图」：把这道题交给上层（App），由它切到取景页并进入补拍模式。
@@ -376,6 +377,12 @@
         />
       </div>
     {/if}
+
+    <!-- 讨论常驻一行入口（组件自己带「展开」），不另设按钮：它在题库页是"看这道题"
+         的一部分，而不是一次性的动作。 -->
+    <div class="panel">
+      <Discussion questionId={opened.ID} />
+    </div>
   {:else}
     <header class="bar">
       <span class="bar-title">题库</span>

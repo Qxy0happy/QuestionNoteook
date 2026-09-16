@@ -15,6 +15,7 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/application"
 
 	"questionbook/internal/capture"
+	"questionbook/internal/discussion"
 	"questionbook/internal/library"
 	"questionbook/internal/review"
 	"questionbook/internal/tags"
@@ -57,6 +58,12 @@ func main() {
 	// 这个模式立好了）。路径与 library.db、cards/ 并列在同一个应用私有目录下。
 	vlmService := vlm.NewService(libraryService, tagsService, filepath.Join(root, "vlm.json"))
 
+	// 讨论要「带图多轮」，而取配置、选 provider、读题图与答案图、以及**同一张图只传一次**的
+	// 那份上传缓存全在 vlm 那一层。所以讨论依赖的是 vlm.Service 本身（它结构上就满足
+	// discussion.Asker），不是把 provider 再注一遍 —— 那等于把上面那些抄成两份。
+	// 必须在 vlmService 之后构造。
+	discussionService := discussion.NewService(db, vlmService)
+
 	app := application.New(application.Options{
 		Name:        "错题本",
 		Description: "考研错题拍照整理与 FSRS 复习",
@@ -66,6 +73,7 @@ func main() {
 			application.NewService(tagsService),
 			application.NewService(reviewService),
 			application.NewService(vlmService),
+			application.NewService(discussionService),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),

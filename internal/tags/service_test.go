@@ -839,6 +839,7 @@ func TestUpgradeFromOlderSchema(t *testing.T) {
 		`DROP TABLE tags`,
 		`DROP TABLE review_logs`,
 		`DROP TABLE review_states`,
+		`DROP TABLE discussions`, // 迁移 4（票据 10）
 		`PRAGMA user_version = 1`,
 	} {
 		if _, err := lib.DB().Exec(stmt); err != nil {

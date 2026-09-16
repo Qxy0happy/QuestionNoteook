@@ -26,6 +26,29 @@ import * as tags$0 from "../tags/models.js";
 import * as $models from "./models.js";
 
 /**
+ * Ask 是「就一道错题跟模型说一句」这条接缝，也是讨论那一侧唯一的入口。
+ * 
+ * 为什么它开在这儿而不是开在讨论包里：这边已经握有那三样东西 —— 配置与 provider 的选法、
+ * 题图的读法、以及 hash → file_id 的**上传缓存**。讨论每一轮都要把题图（与答案图，如果有）
+ * 送上去，缓存不共用就等于每轮重传一遍（票据的硬要求）；而重做一遍取配置、拼报文、
+ * 回落内联那套，只是把同一个东西抄成两份，两边迟早会走偏。
+ * 
+ * history 是**整段对话**，最后一条必须是要问出口的那句（用户消息）。这一层不动它的顺序与
+ * 内容，只做两件事：把这一轮的图挂到最后一条 user 消息上，然后发出去。
+ * 
+ * 图挂在**最后**一条 user 消息上，不挂在第一条：一次请求里只带一份，不随轮数翻倍；
+ * 它又紧挨着这次的问题，将来做历史截断时也不会因为「开头那条被丢掉」而把图弄丢。
+ * 代价是每一轮都重发一次图（服务方那边一张图最多算 1024 token），换来的是模型每一轮
+ * 都真的看着这张图在答。图走的是与打标签**同一份**缓存：同一张题图只上传一次。
+ * 
+ * 题不存在返回 library.ErrNotFound；没配 VLM 返回 ErrNotConfigured；网络与凭据的问题
+ * 由 provider 原样报上来。
+ */
+export function Ask(questionID: number, history: $models.Message[] | null): $CancellablePromise<$models.Reply> {
+    return $Call.ByID(1424447240, questionID, history);
+}
+
+/**
  * Config 返回配置的「界面版」：**不含凭据的值**，只说有没有、多长。
  */
 export function Config(): $CancellablePromise<$models.ConfigView> {
