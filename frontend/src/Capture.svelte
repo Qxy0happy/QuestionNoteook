@@ -82,7 +82,17 @@
 
     let disposed = false;
     navigator.mediaDevices
-      .getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+      // 必须显式要分辨率。不给约束时 WebView 会挑个默认档（常见 640×480），
+      // 而预览是 cover 裁过的，再经选框一裁，成品就只剩两三百像素宽 —— 字都看不清。
+      // 用 ideal 而不是 exact：请求不到理想值也要拿到次好的，别把整条路堵死。
+      .getUserMedia({
+        video: {
+          facingMode: 'environment',
+          width: { ideal: 4096 },
+          height: { ideal: 4096 },
+        },
+        audio: false,
+      })
       .then((s) => {
         // 拿到流时已经不可见（或组件已销毁）：直接把轨道关掉，别泄漏。
         if (disposed) {
@@ -90,6 +100,11 @@
           return;
         }
         stream = s;
+        // 打到 console → 宿主的 onConsoleMessage → logcat。真机上量分辨率只能靠这条。
+        const settings = s.getVideoTracks()[0]?.getSettings();
+        console.log(
+          `相机流实际拿到: ${settings?.width}x${settings?.height} @${settings?.frameRate ?? '?'}fps`,
+        );
         el.srcObject = s;
         return el.play();
       })

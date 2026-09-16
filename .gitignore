@@ -23,3 +23,7 @@ build/android/local.properties
 # go build 直接跑在根目录时会留一个可执行文件在这
 *.exe
 *.apk
+
+# 真机验证的截图与中间产物：可再生，且含实物照片，不进版本库
+.scratch/device-shot-*.png
+.scratch/rectified-card.png

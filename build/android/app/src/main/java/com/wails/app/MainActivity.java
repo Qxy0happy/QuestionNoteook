@@ -22,6 +22,9 @@ import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.util.Base64;
 import android.util.Log;
+import android.webkit.ConsoleMessage;
+import android.webkit.PermissionRequest;
+import android.webkit.WebChromeClient;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebResourceResponse;
 import android.webkit.WebSettings;
@@ -70,6 +73,9 @@ public class MainActivity extends AppCompatActivity {
     private static final int CAMERA_PERMISSION_REQUEST = 7010;
     private File pendingCaptureFile;
     private boolean pendingCaptureIsVideo;
+    // WebView 的 getUserMedia 请求，在等 Android 的运行时权限结果。
+    // 拿到结果后要么 grant 要么 deny，不能就这么搁着 —— 搁着前端会一直卡住。
+    private PermissionRequest pendingWebViewPermission;
 
     // System-event sources (battery/power, screen lock, network). Registered in
     // onCreate, torn down in onDestroy. Each forwards a "system:*" event to JS
@@ -195,6 +201,45 @@ public class MainActivity extends AppCompatActivity {
             }
         });
 
+        // getUserMedia 在 Android WebView 里必须由宿主批准：没有 WebChromeClient 时
+        // WebView 一律拒绝，前端拿到的就是 "Permission denied"。
+        // 上游脚手架里一个 WebChromeClient 都没有（全包 grep 零命中），所以这段是本地补丁 ——
+        // 与 Taskfile 那几处一样，升级 Wails 会覆盖，要重新打。
+        webView.setWebChromeClient(new WebChromeClient() {
+            @Override
+            public void onPermissionRequest(final PermissionRequest request) {
+                boolean wantsVideo = false;
+                for (String resource : request.getResources()) {
+                    if (PermissionRequest.RESOURCE_VIDEO_CAPTURE.equals(resource)) {
+                        wantsVideo = true;
+                    }
+                }
+                // 只放行摄像头。音频、受保护媒体等一律照旧拒绝。
+                if (!wantsVideo) {
+                    request.deny();
+                    return;
+                }
+
+                // Android 的运行时权限得先拿到 —— WebView 这边批了、系统没给 CAMERA，
+                // 摄像头照样打不开。结果在 onRequestPermissionsResult 里转交回来。
+                if (checkSelfPermission("android.permission.CAMERA") != PackageManager.PERMISSION_GRANTED) {
+                    pendingWebViewPermission = request;
+                    requestPermissions(new String[]{"android.permission.CAMERA"}, CAMERA_PERMISSION_REQUEST);
+                    return;
+                }
+                request.grant(new String[]{PermissionRequest.RESOURCE_VIDEO_CAPTURE});
+            }
+
+            // 把前端的 console 转到 logcat。上游脚手架没有这条，于是前端在真机上
+            // 出问题时完全静默 —— 加它是为了能看见，不是为了好看。
+            @Override
+            public boolean onConsoleMessage(ConsoleMessage message) {
+                Log.i(TAG, "[console] " + message.message()
+                    + " (line " + message.lineNumber() + ")");
+                return true;
+            }
+        });
+
         // Add JavaScript interface for Go communication
         webView.addJavascriptInterface(new WailsJSBridge(bridge, webView), "wails");
     }
@@ -241,7 +286,24 @@ public class MainActivity extends AppCompatActivity {
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
         if (requestCode == CAMERA_PERMISSION_REQUEST) {
-            if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            final boolean granted =
+                grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+
+            // 这次权限是替 WebView 的 getUserMedia 要的，结果转交给那个挂起的请求。
+            // 无论给没给都要给出个了断，不能让 WebView 一直等。
+            if (pendingWebViewPermission != null) {
+                PermissionRequest request = pendingWebViewPermission;
+                pendingWebViewPermission = null;
+                if (granted) {
+                    request.grant(new String[]{PermissionRequest.RESOURCE_VIDEO_CAPTURE});
+                } else {
+                    request.deny();
+                }
+                return;
+            }
+
+            // 否则就是系统相机那条路（launchCameraCapture）要的权限。
+            if (granted) {
                 launchCameraCapture(pendingCaptureIsVideo);
             } else {
                 bridge.emitEvent("common:capture", "{\"error\":\"camera permission denied\"}");
