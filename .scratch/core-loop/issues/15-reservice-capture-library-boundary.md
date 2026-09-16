@@ -72,3 +72,25 @@ INSERT 提交之间，只隔着一次本地 SQLite 插入。
 bindings 还没重新生成。桩已还原（`git status` 里 `frontend/bindings` 无改动）。
 
 **未验证**：真机上的 拍摄 → 入库 → 题库列表；以及那个残留窗口在真实失败（磁盘写满 / 库被锁）下的表现。
+
+### 2026-09-16 接线与真机复测（人工补完）
+
+接线做了两处：`main.go`（`library.NewService(db, cardStore)` 先建，再 `capture.NewService(cardStore, libraryService)`）与 `Library.svelte`（`Capture.Card` → `Library.QuestionImage`，`Capture` 那个 import 删掉）。
+
+**真机复测通过，而且是硬证据**：连按两次「确认」之后，设备上 `cards/` 里恰好两个文件，
+库里的两条错题 hash 与它们**逐一对应**：
+
+```
+共 2 道错题
+  id=1 题图=fb81d682415c2fcd…7513c6
+  id=2 题图=45962c9004cc5842…0313e
+```
+
+即 `capture.Capture(...)` 一次调用确实做完了「拉正 + 按内容 hash 落盘 + 建错题」。
+`wails3 build` 生成的跨包返回类型是 `library$0.Question`，生成器处理正确
+（子 agent 曾把这条标为「只读过生成器代码、没跑过」）。
+
+**顺带发现**：`run:device` 每次都先 `uninstall` 再 `install`，所以**每次部署都会清掉应用数据**。
+查库前要意识到这一点，否则会以为数据凭空消失了。
+
+**未验证**：保留的那段孤儿窗口（题图已落盘、写库失败）在真实失败下的表现。
