@@ -16,7 +16,13 @@ html, body {
     color: #f4f6fb;
     /* 整个 app 在内部横向平移，页面自身永不滚动。 */
     overflow: hidden;
-    /* 这是应用不是文档：默认禁选。可编辑区域自己 opt-in。 */
+    /* 这是应用不是文档：默认禁选。要选字的地方自己 opt-in ——
+       输入框（Discussion.svelte 的 .input）、以及讨论里按了「选择文本」的那一条
+       （那边的 .bubble.pick）。为什么不让它默认可选：每一次拖动都会变成选字，
+       而这个应用里横向还能翻页，手势会打架。
+
+       ⚠️ user-select 是**继承**属性 —— opt-in 只要在容器上写一次 `user-select: text`
+       就够，不必去管子孙元素（注入进来的 KaTeX 那一堆 span 也自动跟着开）。 */
     -webkit-user-select: none;
     user-select: none;
     /* 桌面端可以拖窗背景移动窗口（继承给子元素，交互控件用 no-drag 退出）。 */

@@ -1,5 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  // 主包里的薄服务（与 bundleStager 一样），所以绑定落在模块根下、文件名小写。
+  import * as DeviceTime from '../bindings/questionbook/devicetime';
   import Capture from './Capture.svelte';
   import Library from './Library.svelte';
   import Review from './Review.svelte';
@@ -12,9 +14,9 @@
     { id: 'capture', label: '拍照' },
     { id: 'library', label: '题库' },
     { id: 'review', label: '复习' },
-    // 这一页现在是「设置」，但它同时也是 Agent 那层（待批准、Agent 管理数据）的家，
-    // 见票 11。所以 id 留着 agent，标签先叫设置 —— 免得给用户看一个他还用不上的名字。
-    { id: 'agent', label: '设置' },
+    // 这一页是 Agent 那层（票 11）的家：里面两个子标签 —— 与 agent 对话、以及全部设置。
+    // 早先它只有设置，所以标签叫过一阵「设置」；票 11 落地之后叫回 Agent 才名实相符。
+    { id: 'agent', label: 'Agent' },
   ] as const;
 
   // 用查出来的下标而不是写死的数字：改上面的顺序时不会有一处悄悄指错页。
@@ -31,7 +33,33 @@
   onMount(() => {
     // 直接落位，不用平滑滚动 —— 否则打开时会看到一次横向滑动。
     scroller.scrollLeft = scroller.clientWidth * DEFAULT_PAGE;
+
+    void reportTimeZone();
+
+    // 用户可能在后台那段时间改了时区（或者跨了夏令时），回前台时补报一次。
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') void reportTimeZone();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
   });
+
+  // 把**设备时区**告诉 Go。
+  //
+  // 必须做：Go 在安卓上拿不到系统时区（没有 /etc/localtime、没有 $TZ、也没有 GOROOT 里的
+  // zoneinfo.zip），于是 time.Local 就是 UTC。后果不是「显示差八小时」那么轻 ——
+  // 「今天」的边界会整个错一个偏移：复习队列的「今日到期」按 UTC 日切（本地早上 8 点才换日），
+  // 每日汇总设的「晚上 8 点」在本地次日凌晨 4 点才响（实测就是这么响的）。
+  // WebView 这边知道得清清楚楚，所以由它告诉 Go。见 internal/devtz 的包注释。
+  async function reportTimeZone() {
+    try {
+      const zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      if (zone) await DeviceTime.Set(zone);
+    } catch {
+      // 报不上去就算了：Go 那边继续用 time.Local（桌面上是对的，安卓上是 UTC）。
+      // 这是一次尽力而为的修正，不该让启动或切回前台因此出问题。
+    }
+  }
 
   // 点导航栏：平滑滚过去。滚动本身会触发 onPagesScroll，高亮不用在这儿管。
   function goTo(index: number) {

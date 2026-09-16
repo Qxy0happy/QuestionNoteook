@@ -129,6 +129,24 @@ type Answer struct {
 	// 返回值一起丢掉，而这里恰恰有东西要给用户看（已经提议出来的那几条改动）。
 	// 真正的调用失败（没配置、网络、服务方报错）仍然是 error，走另一条路。
 	Problem string
+
+	// Reasoning 是这一轮里模型的思考过程，界面上折在「思考过程」那一块里。
+	//
+	// **它是几段拼起来的**：这条路是工具调用循环，一次提问往往往返好几轮（查标签、
+	// 查题、再回答），而**每一轮的 assistant 消息都自带一段 reasoning_content**。
+	// 拼法就是按轮次先后接起来、中间空一行（converse 里的 r.reasoning）：
+	//   - 前面几段是它在**决定要查什么**时想的（「要改这个标签得先看它在树里的位置」），
+	//   - 最后一段才是得出这个回答的那一段。
+	// 只留最后一段当然更短，但用户点开「思考过程」想看的本来就是「它到底干了些什么」——
+	// 前面几段恰恰是这个问题最直接的答案，而它们的体量也远小于回答本身，不值当为省那几行
+	// 把过程截断。反过来，把每段各自摆成一块也不行：界面上一轮回答只有这一块地方，
+	// 分块就得再给它们编号，而编号对读的人没有意义。
+	//
+	// **它不落库**，原因与 discussion.Message.Reasoning 上写的是同一条（那是讨论那侧的
+	// 同一件事）。这里还多一条更硬的：agent 这几轮的消息**从头到尾就没有进过库** ——
+	// 对话不留档，只有提议出来的改动落 pending_changes。所以关掉再打开，这块东西自然
+	// 也不在了，与「没有历史记录」是同一件事，不是这里漏存了什么。
+	Reasoning string
 }
 
 // Ask 问 agent 一句话：它自己去查数据，然后回答，或者提一条待批准改动。
@@ -167,6 +185,8 @@ func (s *Service) Ask(question string) (Answer, error) {
 		Proposals: r.proposals,
 		Rounds:    rounds,
 		Problem:   problem,
+		// 几轮的思考过程按先后拼起来，见 Answer.Reasoning。
+		Reasoning: strings.Join(r.reasoning, "\n\n"),
 	}, nil
 }
 
@@ -261,6 +281,11 @@ type runner struct {
 	snap     *snapshot
 
 	proposals []PendingChange
+
+	// reasoning 是每一轮的思考过程，按轮次先后攒着（Ask 最后拼成 Answer.Reasoning）。
+	// 攒在这里而不是跟着返回值一层层往上传：converse 的返回值已经有四个了，
+	// 再挂一个只为了原样带出去的东西，读的人得先数清哪个是哪个。
+	reasoning []string
 }
 
 // converse 跑到出答案为止：模型要数据就给数据，要到它不再要、或者回合用尽。
@@ -296,6 +321,13 @@ func (r *runner) converse(ctx context.Context, question string, maxRounds int) (
 		reply, err := r.model.Chat(ctx, req)
 		if err != nil {
 			return "", "", round, err
+		}
+		// 思考过程在**每一轮**的回答上都可能有（包括要调工具的那几轮），所以在这儿收，
+		// 而不是在下面那两条 return 前面收 —— 那两条各自只管自己那一轮的。
+		// 空的那一段不留：没有思考（模型没开思考模式、或者这一轮它没吐）就是没有，
+		// 攒一堆空串拼出来的只会是一串空行。
+		if s := strings.TrimSpace(reply.Reasoning); s != "" {
+			r.reasoning = append(r.reasoning, s)
 		}
 
 		if exhausted {

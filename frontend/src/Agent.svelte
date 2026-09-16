@@ -1,5 +1,11 @@
 <script lang="ts">
-  // Agent 页：配 VLM 的端点与凭据，以及每日汇总通知。
+  // Agent 页：上面一排子标签 ——「对话」与「设置」，默认停在对话。
+  //
+  // 「对话」是与 agent 聊天（整库范围的问题），「设置」是三块配置：VLM 的端点与凭据、
+  // 每日汇总通知、导出整库。为什么这么分：聊天是天天要做的事，配置是一次性的。
+  // 原先两者挤在同一张滚动表单里，一次性的东西占着最显眼的位置，聊天反倒缩在页面最下面
+  // （用户 2026-09-16：「这个我建议做成一个子标签页，现在占据一块的模式，一来不好管理，
+  // 二来看的也难受」）。
   //
   // 为什么这一页是必需的：两份配置都落在应用私有目录
   // （/data/data/<包名>/files/questionbook/ 下的 vlm.json 与 digest.json），
@@ -11,13 +17,10 @@
 
   import { onMount } from 'svelte';
 
-  import * as Agent from '../bindings/questionbook/internal/agent/service';
-  import type { Answer } from '../bindings/questionbook/internal/agent/models';
   // 导出那一面是一个**主包**里的薄适配（bundleStager），所以它的绑定落在模块根下、
   // 文件名小写 —— 与 internal/<包>/service.ts 那套不是一个路子。
   import * as Export from '../bindings/questionbook/bundlestager';
-  import Markdown from './Markdown.svelte';
-  import Pending from './Pending.svelte';
+  import AgentChat from './AgentChat.svelte';
   import * as VLM from '../bindings/questionbook/internal/vlm/service';
   import type { Config, ConfigView } from '../bindings/questionbook/internal/vlm/models';
   import * as Digest from '../bindings/questionbook/internal/digest/service';
@@ -26,6 +29,9 @@
     ConfigView as DigestConfigView,
     Slot,
   } from '../bindings/questionbook/internal/digest/models';
+
+  // 默认停在「对话」：问 agent 是常用的那件事，配模型不是。
+  let tab = $state<'chat' | 'settings'>('chat');
 
   let root = $state<HTMLElement | null>(null);
   let view = $state<ConfigView | null>(null);
@@ -117,35 +123,6 @@
       exportError = errorMessage(err);
     } finally {
       exporting = false;
-    }
-  }
-
-  // ── 问 agent（票 11）──
-  //
-  // agent 读得到一切，但**每一次写都变成一条待批准改动** —— 那是 Go 侧用反射锁与源码
-  // 扫描钉死的性质（internal/agent/safety_test.go），不是这里的自觉。所以这里问一句话
-  // 最坏的结果是「多出几条待批准」，正式数据一个字节都不会动。
-  let askText = $state('');
-  let asking = $state(false);
-  let answer = $state<Answer | null>(null);
-  let askError = $state('');
-  // 变了就让待批准清单重读一遍：agent 刚提的新东西得当场出现。
-  let pendingKey = $state(0);
-
-  async function askAgent() {
-    const q = askText.trim();
-    if (!q || asking) return;
-    asking = true;
-    askError = '';
-    try {
-      answer = await Agent.Ask(q);
-      askText = '';
-      // 无论这一轮提没提改动都 +1 —— 重读一次是最省事的「与库对齐」。
-      pendingKey += 1;
-    } catch (err) {
-      askError = errorMessage(err);
-    } finally {
-      asking = false;
     }
   }
 
@@ -320,10 +297,42 @@
     {/if}
   </header>
 
-  {#if loading && !view}
+  <!-- 子标签。用一排按钮而不是靠横滑：横滑在 App 那一层是**翻页**（切「拍照/题库/复习/设置」），
+       这里再套一层横滑，同一个手势就会有两种意思。 -->
+  <nav class="tabs" aria-label="这一页的分区">
+    <button
+      class="tab"
+      class:on={tab === 'chat'}
+      aria-current={tab === 'chat' ? 'page' : undefined}
+      onclick={() => (tab = 'chat')}
+    >
+      对话
+    </button>
+    <button
+      class="tab"
+      class:on={tab === 'settings'}
+      aria-current={tab === 'settings' ? 'page' : undefined}
+      onclick={() => (tab = 'settings')}
+    >
+      设置
+    </button>
+  </nav>
+
+  <!-- 两块都留在 DOM 里，只是把不显示的那块藏起来。
+       对话那块**不能**用 {#if} 卸掉：它会话不落库（见 AgentChat.svelte 的文件头），
+       去设置页填个 Key 再回来就会把刚聊的一整段丢掉。 -->
+  <div class="pane" class:hidden={tab !== 'chat'}>
+    <!-- configured 由这里喂进去：这一页要判断「模型配没配」，而那份配置是这一层读的
+         （它同时还要给上面那个「已配置/未配置」的角标用）。 -->
+    <AgentChat configured={view ? view.Configured : null} />
+  </div>
+
+  <!-- loading 那句只在「设置」这一页说：它是这张表单在等的配置。停在对话页时不该冒出来 ——
+       它会是 .agent 这一列的第二个孩子，在聊天区下面露出一行。 -->
+  {#if tab === 'settings' && loading && !view}
     <p class="hint">正在读配置…</p>
   {:else}
-    <div class="form">
+    <div class="form" class:hidden={tab !== 'settings'}>
       <p class="note">
         识别标签要用云端模型。配置留在本机，卸载应用会一起没。
         {#if view?.Path}<br /><code>{view.Path}</code>{/if}
@@ -418,7 +427,7 @@
         <button class="pill" onclick={load} disabled={saving || loading}>重新读取</button>
       </div>
 
-      <!-- 两块设置共用一个滚动区：各给一个 .form 会各带一条滚动条，
+      <!-- 这几块设置共用一个滚动区：各给一个 .form 会各带一条滚动条，
            手机上滑起来会分不清自己在滚哪一块。 -->
       <hr class="sep" />
 
@@ -478,7 +487,7 @@
 
       <p class="note">
         把整个错题本打成一个 zip 放进系统的「下载」目录：里面是库与全部题图答案图。
-        应用一卸载私有目录就全没了，**这个包是防丢的唯一手段**。
+        应用一卸载私有目录就全没了 —— 这个包是防丢的唯一手段。
         <br />
         题图是原始像素，包可能不小；导完会在下面告诉你它落在哪。
       </p>
@@ -495,58 +504,6 @@
           {exporting ? '打包中…' : '导出整库'}
         </button>
       </div>
-
-      <hr class="sep" />
-
-      <p class="note">
-        还可以直接问它关于全部错题的问题（比如「我数学哪块最弱」）—— 它会自己去查数据。
-        它**改不动**正式数据：想改什么只能提一条待批准改动，等你逐条点头。
-      </p>
-
-      {#if askError}
-        <p class="banner">{askError}</p>
-      {/if}
-
-      <label>
-        <span>问一句</span>
-        <input
-          bind:value={askText}
-          type="text"
-          autocapitalize="none"
-          autocorrect="off"
-          spellcheck="false"
-          placeholder="我数学哪块最弱"
-          onkeydown={(e) => {
-            if (e.key === 'Enter') void askAgent();
-          }}
-        />
-      </label>
-      <div class="actions">
-        <button class="pill go" onclick={askAgent} disabled={asking || !askText.trim()}>
-          {asking ? '它在查…' : '问'}
-        </button>
-      </div>
-
-      {#if answer}
-        <div class="answer">
-          <!-- 模型吐的是同一种东西（markdown + 公式），所以与讨论那边共用一套渲染。 -->
-          {#if answer.Text}
-            <Markdown text={answer.Text} />
-          {/if}
-          {#if answer.Proposals?.length}
-            <p class="note">这一轮提了 {answer.Proposals.length} 条待批准改动，在下面。</p>
-          {/if}
-          {#if answer.Problem}
-            <p class="banner warn">{answer.Problem}</p>
-          {/if}
-        </div>
-      {/if}
-
-      <hr class="sep" />
-
-      <!-- 待批准清单（票 11）：agent 提议的改动都在这儿，逐条批准或丢弃。
-           批准之前不影响正式数据。 -->
-      <Pending refreshKey={pendingKey} />
     </div>
   {/if}
 </div>
@@ -581,6 +538,48 @@
     color: rgba(150, 230, 180, 0.85);
   }
 
+  /* 子标签那一排：两个平级的按钮，当前那个亮起来。 */
+  .tabs {
+    flex: none;
+    display: flex;
+    gap: 0.4rem;
+    padding: 0.6rem 1rem 0;
+  }
+  .tab {
+    flex: none;
+    padding: 0.4rem 1rem;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    background: transparent;
+    color: rgba(244, 246, 251, 0.6);
+    font: inherit;
+    font-size: 0.9rem;
+    cursor: pointer;
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
+    --wails-draggable: no-drag;
+  }
+  .tab.on {
+    border-color: rgba(130, 200, 255, 0.6);
+    background: rgba(130, 200, 255, 0.14);
+    color: #9fd4ff;
+    font-weight: 600;
+  }
+
+  /* 对话那一块：flex:1 + min-height:0，让它按**剩下的**高度定尺寸，
+     内部（记录区 / 输入框）再各自安排 —— 键盘压矮窗口时它跟着矮，输入框就浮上去了。 */
+  .pane {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+  /* 不显示的那一块整个移出布局（不是 visibility）：它不该占着高度，
+     也不该被别处的高度计算算进去。 */
+  .pane.hidden {
+    display: none;
+  }
+
   .form {
     flex: 1;
     min-height: 0;
@@ -589,6 +588,10 @@
     flex-direction: column;
     gap: 0.85rem;
     padding: 1rem;
+  }
+  /* 「设置」那一块靠这个藏起来：.form.hidden 比 .form 多一个类，权重够，与先后顺序无关。 */
+  .form.hidden {
+    display: none;
   }
 
   .note {
@@ -690,14 +693,6 @@
   input[type='time']::-webkit-calendar-picker-indicator {
     filter: invert(1);
     opacity: 0.55;
-  }
-
-  /* agent 的回答：markdown + 公式，样式交给 Markdown 组件，这里只管这一格的外观。 */
-  .answer {
-    padding: 0.75rem 0.9rem;
-    border: 1px solid rgba(244, 246, 251, 0.12);
-    border-radius: 0.6rem;
-    background: rgba(244, 246, 251, 0.04);
   }
 
   .actions {

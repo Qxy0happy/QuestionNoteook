@@ -36,6 +36,24 @@ export function Ask(questionID: number, text: string): $CancellablePromise<$mode
 }
 
 /**
+ * EditAndResend 把一条用户消息改成新的字，再拿改过的这段对话重问一次。
+ * 
+ * 顺序就是 Ask 的顺序，只是「记下用户这句」换成了「换掉用户这句」：**先落库，再问模型**。
+ * 换掉 = 从这条（含）起往后的记录全部作废、写进新的这句，删与写在同一个事务里
+ * （Store.replaceFrom）。所以模型失败时用户刚打的字还在库里 —— 界面重读一次 History
+ * 就能看到它，那就是那条不变量的样子。
+ * 
+ * 作废掉的后半截是这个动作**本身**要丢的东西（改了一句，后面那些就都不作数了），
+ * 不是失败弄丢的：失败弄丢的顶多是「模型这次没答上来」这一件。界面上得把这件事
+ * 说在动手之前（见 Discussion.svelte 的编辑态）。
+ * 
+ * 只能改**用户自己**说的那句；模型那条走 Regenerate。
+ */
+export function EditAndResend(questionID: number, messageID: number, text: string): $CancellablePromise<$models.Message[] | null> {
+    return $Call.ByID(3868957616, questionID, messageID, text);
+}
+
+/**
  * History 返回一道错题的讨论记录，从早到晚（同一毫秒内按落库先后）。
  * 
  * 题不存在时返回空集而不是报错：这是个读，界面拿一个刚被删掉的 id 来问是正常的，
@@ -52,4 +70,20 @@ export function History(questionID: number): $CancellablePromise<$models.Message
  */
 export function Presets(): $CancellablePromise<string[] | null> {
     return $Call.ByID(2472319114);
+}
+
+/**
+ * Regenerate 让模型把最后那条回答重说一遍。
+ * 
+ * 「删掉最后那条模型回答，拿前面那句用户提问再问一次」—— 但实现是**先问、后换**，
+ * 不是先删后问。先删的话，模型这一次没答上来就把一条本来好好的回答弄没了：
+ * 用户什么都没换到，还倒赔一条。顺序因此是：读历史 → 砍到那条提问为止当上下文 → 问模型 →
+ * 在事务里把旧回答换成新的（Store.replaceFrom）。失败时库里一个字节都没动，再点一次即可。
+ * 
+ * 只认最后一条记录、而且它得是模型的回答，位置不对返回 ErrNotRegeneratable。
+ * 「重说中间某一条回答」听着像同一件事，其实要顺手丢掉它后面那几轮对话 —— 那是用户
+ * 没要求过的删除，不该藏在「重新生成」这个动作里。要那个效果走 EditAndResend。
+ */
+export function Regenerate(questionID: number, messageID: number): $CancellablePromise<$models.Message[] | null> {
+    return $Call.ByID(3019308172, questionID, messageID);
 }

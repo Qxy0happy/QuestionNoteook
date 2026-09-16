@@ -105,6 +105,9 @@ func (s *Service) Ask(questionID int64, text string) (Turn, error) {
 	if err != nil {
 		return Turn{}, err
 	}
+	// 思考过程只在返回值上贴一下，不进库（理由写在 Message.Reasoning 上）。
+	// 贴在这一条而不是 Turn 上：界面本来就按「每条回答」渲染那一块，不必为它单开一个槽。
+	said.Reasoning = strings.TrimSpace(reply.Reasoning)
 	return Turn{Question: asked, Reply: said}, nil
 }
 

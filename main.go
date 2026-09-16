@@ -18,6 +18,7 @@ import (
 	agentapply "questionbook/internal/agent/apply"
 	agentstore "questionbook/internal/agent/store"
 	"questionbook/internal/capture"
+	"questionbook/internal/devtz"
 	"questionbook/internal/digest"
 	"questionbook/internal/discussion"
 	"questionbook/internal/export"
@@ -58,7 +59,10 @@ func main() {
 	// 标签与错题共用同一个连接（tags.NewService 内部走 store.DB()），复习也一样
 	// （review.NewService 吃的是 Store 而不是 Service，自己借那条连接）。都不再开第二条。
 	tagsService := tags.NewService(db)
-	reviewService := review.NewService(db)
+	// review 与 digest 的「今天」都从 now.Location() 推出来。**安卓上 Go 的 time.Local 是 UTC**
+	// （拿不到系统时区），所以这两处必须用 devtz.Now —— 否则「今日到期」按 UTC 日切、
+	// 每日汇总的钟点也会差一个偏移。见 internal/devtz 的包注释。
+	reviewService := review.NewService(db, review.WithNow(devtz.Now))
 
 	// VLM 的端点与凭据不进库：它们是配置，不是错题的数据模型（ADR-0004 已经把「库外的东西」
 	// 这个模式立好了）。路径与 library.db、cards/ 并列在同一个应用私有目录下。
@@ -76,7 +80,7 @@ func main() {
 
 	// 每日汇总（票 12）：Go 侧只负责算出未来若干天各自的到期数与该发什么。真正到点发那条
 	// 通知的是 Java 宿主 —— 它会读 digest-schedule.json，并且**自己再核一遍**才发。
-	digestService := digest.NewService(db, filepath.Join(root, "digest.json"))
+	digestService := digest.NewService(db, filepath.Join(root, "digest.json"), digest.WithNow(devtz.Now))
 
 	// agent（票 11）：读的那一侧拿的是只有 Query/QueryRow 的 Querier（不是 *sql.DB），
 	// 提议那一侧只能往待批准表里写。执行者 apply.New **全应用只在这里构造一次** ——
@@ -106,6 +110,8 @@ func main() {
 			application.NewService(pend),
 			// 导出只露 Stage 那一面 —— 理由见 bundleStager 的注释。
 			application.NewService(&bundleStager{svc: exportService}),
+			// 前端启动时用它把设备时区报进来（见 deviceTime 的注释）。
+			application.NewService(&deviceTime{}),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
@@ -122,6 +128,17 @@ func main() {
 		BackgroundColour: application.NewRGB(6, 7, 15),
 		URL:              "/",
 	})
+
+	// 打开宿主的软键盘监听。
+	//
+	// 前端**必须**靠它才知道键盘有多高：安卓 15 + targetSdk 35 之后系统强制边到边，
+	// manifest 里的 adjustResize 对输入法已经不生效（窗口不再被压短），而 WebView 自己
+	// 也没有 OSK 感知（visualViewport / dvh / interactive-widget 全都不动，crbug 40287394）。
+	// 于是唯一可信的键盘高度就是宿主报的 common:keyboard 事件，而它默认是关着的。
+	//
+	// 这条开关属于接线，不属于任何一个业务包 —— 桌面端以及没有这块能力的平台是空实现，
+	// 照调不会有事。（早先它被临时塞在 internal/discussion 里，那是分层不对，已挪到这儿。）
+	application.Mobile.SetKeyboardWatch(true)
 
 	if err := app.Run(); err != nil {
 		log.Fatal(err)
@@ -149,6 +166,20 @@ func (f cardFiles) RectifyAndSave(frame image.Image, quad library.Quad) (string,
 	}
 	return hash.String(), nil
 }
+
+// deviceTime 是给前端的一个小服务：把**设备时区**告诉 Go。
+//
+// 为什么需要这么一条：Go 在安卓上拿不到系统时区（time.Local 就是 UTC），而所有「今天」
+// 都建在它上面 —— 复习队列的今日到期、每日汇总的发车时刻。WebView 那边知道得清清楚楚
+// （Intl.DateTimeFormat().resolvedOptions().timeZone），所以由前端启动时告诉 Go 一次。
+// 见 internal/devtz 的包注释。
+type deviceTime struct{}
+
+// Set 记住设备时区（IANA 名，如 "Asia/Shanghai"），返回记下的那个。
+func (deviceTime) Set(zoneID string) (string, error) { return devtz.Set(zoneID) }
+
+// Get 报告当前记着的时区名；空串表示还没被设过（此时用的是 time.Local，安卓上即 UTC）。
+func (deviceTime) Get() string { return devtz.ID() }
 
 // bundleStager 是给前端的导出那一面。
 //
