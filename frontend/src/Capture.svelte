@@ -28,7 +28,7 @@
   let stageH = $state(0);
   // 选框，归一化到帧上（定义见 CropBox 的 Box）。
   let crop = $state<Box>({ ...DEFAULT_BOX });
-  // 入库后按 hash 取回的成品卡片图（PNG data URL）。
+  // 入库后按 hash 取回的成品题图（PNG data URL）。
   let cardUrl = $state<string | null>(null);
   // 交给 Go 的那一趟还没回来。期间锁住三个按钮，免得重复提交。
   let busy = $state(false);
@@ -213,7 +213,7 @@
       // 源矩形与目标同尺寸 —— 逐像素搬运，不重采样。
       ctx.drawImage(src, px, py, pw, ph, 0, 0, pw, ph);
 
-      // PNG 而不是 JPEG：卡片图存的是原始像素，过一次有损编码就再也回不来了
+      // PNG 而不是 JPEG：题图存的是原始像素，过一次有损编码就再也回不来了
       // （spec 的 Out of Scope：不做不可逆增强）。
       const base64 = cut.toDataURL('image/png').split(',')[1];
       if (!base64) throw new Error('裁图：PNG 编码失败');
@@ -237,9 +237,9 @@
       //    Rectify 是内容寻址的，返回同一个 hash，走的是同一条路径。
       //
       //    反过来（Add 成功但取图失败）就会出事：catch 里 frame 不清、busy 已释放，
-      //    用户再按一次「确认」时 Add 会为同一张卡片图**再建一道错题**，题号翻倍。
+      //    用户再按一次「确认」时 Add 会为同一张题图**再建一道错题**，题号翻倍。
       //
-      //    另：先 Add 并不能避免孤儿文件 —— 卡片图是 Rectify 内部落盘的，
+      //    另：先 Add 并不能避免孤儿文件 —— 题图是 Rectify 内部落盘的，
       //    走到 Add 这一步时文件早就写下去了，两种顺序的孤儿窗口一样大。
       const card = await capture.Card(hash);
 
@@ -400,7 +400,7 @@
     -webkit-user-drag: none;
   }
 
-  /* 成品卡片图。已经拉正了，按原比例整个装进来即可。 */
+  /* 成品题图。已经拉正了，按原比例整个装进来即可。 */
   .card {
     max-width: 100%;
     max-height: 78%;

@@ -128,7 +128,7 @@ func TestServiceRectifyThenCardRoundTrip(t *testing.T) {
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		t.Fatalf("读卡片目录失败: %v", err)
+		t.Fatalf("读题图目录失败: %v", err)
 	}
 	if len(entries) != 1 {
 		t.Errorf("去重失效：目录里有 %d 个文件，期望 1 个", len(entries))
@@ -156,7 +156,7 @@ func TestServiceRectifyThenCardRoundTrip(t *testing.T) {
 		t.Fatalf("尺寸不一致: got %v, want %v", got.Bounds(), want.Bounds())
 	}
 	if !bytes.Equal(toRGBA(got).Pix, want.Pix) {
-		t.Error("取回的卡片图与直接 Rectify 的结果不是逐像素相同")
+		t.Error("取回的题图与直接 Rectify 的结果不是逐像素相同")
 	}
 }
 

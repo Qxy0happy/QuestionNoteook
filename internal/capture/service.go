@@ -49,9 +49,9 @@ func (s *Service) Rectify(frameBase64 string, quad Quad) (string, error) {
 	return h.String(), nil
 }
 
-// Card 按 hash 取回卡片图，返回 PNG 的 base64 供界面显示。
+// Card 按 hash 取回题图，返回 PNG 的 base64 供界面显示。
 //
-// 一律编成 PNG：卡片图是**原始像素**，不能再过一次有损编码（spec 的 Out of Scope）。
+// 一律编成 PNG：题图是**原始像素**，不能再过一次有损编码（spec 的 Out of Scope）。
 func (s *Service) Card(hash string) (string, error) {
 	img, err := s.store.Load(Hash(hash))
 	if err != nil {
@@ -60,7 +60,7 @@ func (s *Service) Card(hash string) (string, error) {
 
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, img); err != nil {
-		return "", fmt.Errorf("采集: 卡片图编码失败: %w", err)
+		return "", fmt.Errorf("采集: 题图编码失败: %w", err)
 	}
 	return base64.StdEncoding.EncodeToString(buf.Bytes()), nil
 }

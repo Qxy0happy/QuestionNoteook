@@ -19,16 +19,16 @@ import * as $models from "./models.js";
 /**
  * Add 落一道新错题，返回落库后的记录（含分配到的 id 与创建时间）。
  * 
- * 两个参数都是卡片图的内容 hash；answerHash 传空串表示还没拍答案图。
+ * 两个参数都是题图的内容 hash；answerHash 传空串表示还没拍答案图。
  */
 export function Add(questionHash: string, answerHash: string): $CancellablePromise<$models.Question> {
     return $Call.ByID(3143855092, questionHash, answerHash);
 }
 
 /**
- * Delete 删掉一道错题，并返回被删掉的那条记录 —— 调用方据此知道该回收哪两张卡片图。
+ * Delete 删掉一道错题，并返回被删掉的那条记录 —— 调用方据此知道该回收哪两张题图。
  * 
- * 注意它只删库里的行，不碰图片文件：同一张卡片图可能被多道题引用，回收是引用计数的事。
+ * 注意它只删库里的行，不碰图片文件：同一张题图可能被多道题引用，回收是引用计数的事。
  */
 export function Delete(id: number): $CancellablePromise<$models.Question> {
     return $Call.ByID(4190043338, id);

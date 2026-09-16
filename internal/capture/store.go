@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 )
 
-// Hash 是卡片图内容的 SHA-256，小写十六进制。
+// Hash 是题图内容的 SHA-256，小写十六进制。
 //
 // 它既是文件名也是去重键：库里存的就是它（ADR-0004）。
 type Hash string
@@ -20,11 +20,11 @@ type Hash string
 // String 返回十六进制文本，方便直接塞进 SQLite 或者发给前端。
 func (h Hash) String() string { return string(h) }
 
-// ext 是卡片图的扩展名。存 PNG：无损、标准库自带、没有专利尾巴。
+// ext 是题图的扩展名。存 PNG：无损、标准库自带、没有专利尾巴。
 // 「不做不可逆增强、存原始像素」这条契约靠它落实 —— 别换 JPEG。
 const ext = ".png"
 
-// Store 把卡片图按内容 hash 落在应用私有目录里。
+// Store 把题图按内容 hash 落在应用私有目录里。
 //
 // 目录由外部注入：安卓上沙箱路径只有宿主知道，测试里注入 t.TempDir()。
 // 同一个 Store 可以并发用 —— 落盘走「同目录临时文件 + 原子改名」，
@@ -72,17 +72,17 @@ func (s *Store) Save(img image.Image) (Hash, error) {
 	return h, nil
 }
 
-// Load 读回某个 hash 对应的卡片图。
+// Load 读回某个 hash 对应的题图。
 func (s *Store) Load(h Hash) (image.Image, error) {
 	f, err := os.Open(s.Path(h))
 	if err != nil {
-		return nil, fmt.Errorf("capture: 打开卡片图 %s: %w", h, err)
+		return nil, fmt.Errorf("capture: 打开题图 %s: %w", h, err)
 	}
 	defer f.Close()
 
 	img, err := png.Decode(f)
 	if err != nil {
-		return nil, fmt.Errorf("capture: 解码卡片图 %s: %w", h, err)
+		return nil, fmt.Errorf("capture: 解码题图 %s: %w", h, err)
 	}
 	return img, nil
 }

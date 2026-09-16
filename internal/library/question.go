@@ -11,7 +11,7 @@ import (
 //
 // 两个 hash 都是图片**内容**的 hash（算法由采集层定），图片本体在库外的文件里，
 // 库里只记 hash（ADR-0004）。因此「同一张图被两道题引用」是合法的：去重发生在
-// 文件那一层，不是题目这一层，所以 question_hash 上没有唯一约束。
+// 文件那一层，不是错题这一层，所以 question_hash 上没有唯一约束。
 type Question struct {
 	ID           int64     // 落库时分配；AddQuestion 之前是 0
 	QuestionHash string    // 题图的内容 hash，必有

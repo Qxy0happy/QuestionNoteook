@@ -25,8 +25,8 @@
   let confirming = $state(false);
   let busy = $state(false);
 
-  // 取回来的卡片图按 hash 存一份：同一道题反复开合不必重走一次 IPC。
-  // 一张卡片图撑死几百 KB，错题本量小，先不做淘汰。
+  // 取回来的题图按 hash 存一份：同一道题反复开合不必重走一次 IPC。
+  // 一张题图撑死几百 KB，错题本量小，先不做淘汰。
   const cards = new Map<string, string>();
 
   async function refresh() {
@@ -314,7 +314,7 @@
     /* 整张看全：题图是原始像素，不裁。 */
     object-fit: contain;
     border-radius: 0.5rem;
-    /* 垫一层白：卡片图可能有透明区，深色底上会看成黑洞。 */
+    /* 垫一层白：题图可能有透明区，深色底上会看成黑洞。 */
     background: #fff;
     -webkit-user-drag: none;
   }

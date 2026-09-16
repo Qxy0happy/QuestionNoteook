@@ -241,7 +241,7 @@ func TestDeleteQuestionLeavesOthers(t *testing.T) {
 	assertQuestion(t, keep, qs[0])
 }
 
-// 去重发生在文件那一层，题目这一层允许两道题共用一张图（ADR-0004）。
+// 去重发生在文件那一层，错题这一层允许两道题共用一张图（ADR-0004）。
 func TestSameImageBacksTwoQuestions(t *testing.T) {
 	s := newStore(t)
 	first := addQuestion(t, s, Question{QuestionHash: "sha256:同一张图", CreatedAt: baseTime})

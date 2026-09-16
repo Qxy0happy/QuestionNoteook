@@ -18,9 +18,9 @@ import { Call as $Call, CancellablePromise as $CancellablePromise } from "@wails
 import * as $models from "./models.js";
 
 /**
- * Card 按 hash 取回卡片图，返回 PNG 的 base64 供界面显示。
+ * Card 按 hash 取回题图，返回 PNG 的 base64 供界面显示。
  * 
- * 一律编成 PNG：卡片图是**原始像素**，不能再过一次有损编码（spec 的 Out of Scope）。
+ * 一律编成 PNG：题图是**原始像素**，不能再过一次有损编码（spec 的 Out of Scope）。
  */
 export function Card(hash: string): $CancellablePromise<string> {
     return $Call.ByID(509030524, hash);

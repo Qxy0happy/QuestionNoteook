@@ -14,7 +14,7 @@ func NewService(store *Store) *Service {
 
 // Add 落一道新错题，返回落库后的记录（含分配到的 id 与创建时间）。
 //
-// 两个参数都是卡片图的内容 hash；answerHash 传空串表示还没拍答案图。
+// 两个参数都是题图的内容 hash；answerHash 传空串表示还没拍答案图。
 func (s *Service) Add(questionHash string, answerHash string) (Question, error) {
 	return s.store.AddQuestion(Question{
 		QuestionHash: questionHash,
@@ -32,9 +32,9 @@ func (s *Service) List() ([]Question, error) {
 	return s.store.ListQuestions()
 }
 
-// Delete 删掉一道错题，并返回被删掉的那条记录 —— 调用方据此知道该回收哪两张卡片图。
+// Delete 删掉一道错题，并返回被删掉的那条记录 —— 调用方据此知道该回收哪两张题图。
 //
-// 注意它只删库里的行，不碰图片文件：同一张卡片图可能被多道题引用，回收是引用计数的事。
+// 注意它只删库里的行，不碰图片文件：同一张题图可能被多道题引用，回收是引用计数的事。
 func (s *Service) Delete(id int64) (Question, error) {
 	return s.store.DeleteQuestion(id)
 }

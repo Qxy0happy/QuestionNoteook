@@ -27,10 +27,10 @@ func main() {
 		log.Fatalf("拿不到应用数据目录: %v", err)
 	}
 
-	// 卡片图与库文件都在这个目录下。两者都是「库外」的东西：库里只记 hash（ADR-0004）。
+	// 题图与库文件都在这个目录下。两者都是「库外」的东西：库里只记 hash（ADR-0004）。
 	cardStore, err := capture.NewStore(filepath.Join(root, "cards"))
 	if err != nil {
-		log.Fatalf("打不开卡片图目录: %v", err)
+		log.Fatalf("打不开题图目录: %v", err)
 	}
 
 	db, err := library.Open(filepath.Join(root, "library.db"))

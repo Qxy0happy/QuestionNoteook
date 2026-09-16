@@ -52,7 +52,7 @@ func TestRectify_Perspective(t *testing.T) {
 	if frac := float64(red) / float64(b.Dx()*b.Dy()); frac > 0.10 {
 		t.Errorf("拉正结果里有 %.1f%% 的像素是选区外的红色，想要接近 0", frac*100)
 	} else {
-		t.Logf("卡片图 %v，其中 %.2f%% 是边缘插值混出来的选区外红色", b, frac*100)
+		t.Logf("题图 %v，其中 %.2f%% 是边缘插值混出来的选区外红色", b, frac*100)
 	}
 }
 
@@ -148,7 +148,7 @@ func TestRectify_RotatedQuad(t *testing.T) {
 	}
 }
 
-// TestRectify_RejectsUnusableInput 覆盖抠不出卡片图的那几种输入。
+// TestRectify_RejectsUnusableInput 覆盖抠不出题图的那几种输入。
 func TestRectify_RejectsUnusableInput(t *testing.T) {
 	src := image.NewRGBA(image.Rect(0, 0, 32, 32))
 	for y := 0; y < 32; y++ {

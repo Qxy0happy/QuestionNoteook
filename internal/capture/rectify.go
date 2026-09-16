@@ -6,7 +6,7 @@ import (
 	"math"
 )
 
-// Rectify 把 img 上由 q 围出的四边形透视重映射成一张拉正的矩形卡片图。
+// Rectify 把 img 上由 q 围出的四边形透视重映射成一张拉正的矩形题图。
 //
 // 输出尺寸取四边形对边里较长的那条，于是拉正后的图既不丢细节也不留黑边。
 // 采样走双线性插值，落盘的是原始像素，没有任何增强。
@@ -92,7 +92,7 @@ func inverseMap(q Quad) (homography, error) {
 	t := squareToQuad(q)
 
 	// 自交的四边形（蝴蝶结）不是任何矩形在透视下的像，它的分母会在定义域里变号。
-	// 撞上这种情况直接报错，别把 Inf/NaN 悄悄写进卡片图。
+	// 撞上这种情况直接报错，别把 Inf/NaN 悄悄写进题图。
 	var hasPositive, hasNegative bool
 	for _, uv := range [4][2]float64{{0, 0}, {1, 0}, {1, 1}, {0, 1}} {
 		switch d := t.denominator(uv[0], uv[1]); {
@@ -154,7 +154,7 @@ func squareToQuad(q Quad) homography {
 // sampleBilinear 在原图坐标 (x,y) 处取双线性插值的颜色。
 //
 // 采样点落在原图之外时返回全透明。插值核越过图边时按边缘像素外推，
-// 免得卡片图的边上出现一圈半透明的缝。
+// 免得题图的边上出现一圈半透明的缝。
 func sampleBilinear(src *image.RGBA, x, y float64) color.RGBA {
 	b := src.Bounds()
 	if x < float64(b.Min.X) || x >= float64(b.Max.X) ||
