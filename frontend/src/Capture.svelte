@@ -1,19 +1,67 @@
 <script lang="ts">
   // 取景页。本页是三页里的默认落地页，所以挂载即开镜 —— 不需要额外的「打开相机」点击。
   // 取景框与中心十字是**纯装饰**的对准辅助：不做边缘检测，也不随画面内容变化。
+  //
+  // 快门之后本页进入「框选」态：底图铺满 + 居中可变边长的矩形选框。
+  // 确认那一刻定稿 —— 裁出的子图交给 Go 侧拉正、落盘、入库，帧随即丢掉（ADR-0007）。
+
+  import * as capture from '../bindings/questionbook/internal/capture/service.js';
+  import * as library from '../bindings/questionbook/internal/library/service.js';
+  import type { Quad } from '../bindings/questionbook/internal/capture/models.js';
+  import CropBox, { type Box } from './CropBox.svelte';
+
+  // 选框初值：居中、占七成。留出的那一圈不只是好看 —— 看得见框外，才判断得出框歪没歪。
+  const DEFAULT_BOX: Box = { x: 0.15, y: 0.15, w: 0.7, h: 0.7 };
 
   let root = $state<HTMLElement | null>(null);
   let video = $state<HTMLVideoElement | null>(null);
+  // 框选态的舞台。帧在它里面按 contain 铺开，选框也以它为坐标系。
+  let stage = $state<HTMLElement | null>(null);
   // 本页是否露在屏幕上。三页是同时挂载的，只有可见时才该占着相机。
   let visible = $state(false);
   // 快门抓到的无损帧（源像素密度，已按预览裁过），交给下游的那一份。
   let frame = $state<HTMLCanvasElement | null>(null);
   // 同一个帧的 JPEG data URL，**仅供显示** —— 有损，不进图像管线。
   let frameUrl = $state<string | null>(null);
+  // 舞台的像素尺寸。帧铺多大、选框换算成屏幕上的哪一块，都从它来。
+  let stageW = $state(0);
+  let stageH = $state(0);
+  // 选框，归一化到帧上（定义见 CropBox 的 Box）。
+  let crop = $state<Box>({ ...DEFAULT_BOX });
+  // 入库后按 hash 取回的成品卡片图（PNG data URL）。
+  let cardUrl = $state<string | null>(null);
+  // 交给 Go 的那一趟还没回来。期间锁住三个按钮，免得重复提交。
+  let busy = $state(false);
   let errorText = $state('');
 
   // 流只在可见期间持有，滑走就还给系统。
   let stream: MediaStream | null = null;
+
+  // 帧在舞台上实际占住的那块矩形 —— 就是屏幕上「帧的 (0,0)」与右下角所在的位置。
+  // 选框的归一化坐标靠它换算，所以它必须与 .base 的定位用**同一个**算出来的值，
+  // 不能指望 CSS 那边再算一遍（两边差一个像素，框出来的就不是用户看到的那块）。
+  const baseRect = $derived.by(() => {
+    const src = frame;
+    if (!src || stageW < 1 || stageH < 1) return { left: 0, top: 0, width: 0, height: 0 };
+    const s = Math.min(stageW / src.width, stageH / src.height);
+    const width = src.width * s;
+    const height = src.height * s;
+    return { left: (stageW - width) / 2, top: (stageH - height) / 2, width, height };
+  });
+
+  $effect(() => {
+    const el = stage;
+    if (!el) return;
+    // 舞台只在框选态存在，所以这个观察器跟着框选态生灭；窗口尺寸一变它自己会报。
+    const ro = new ResizeObserver(() => {
+      stageW = el.clientWidth;
+      stageH = el.clientHeight;
+    });
+    ro.observe(el);
+    stageW = el.clientWidth;
+    stageH = el.clientHeight;
+    return () => ro.disconnect();
+  });
 
   $effect(() => {
     const el = root;
@@ -88,27 +136,146 @@
     // 源矩形与目标同尺寸 —— 逐像素搬运，不重采样。
     ctx.drawImage(el, sx, sy, w, h, 0, 0, w, h);
 
+    crop = { ...DEFAULT_BOX };
+    cardUrl = null;
     frame = canvas;
     frameUrl = canvas.toDataURL('image/jpeg', 0.92);
   }
 
+  // 旋转底图（顺时针 90°）。转的是**无损帧**本身，不是显示用的那张 img：
+  // 90° 整倍数的旋转是像素的置换，没有重采样，所以转几次都不掉画质。
+  function rotate() {
+    const src = frame;
+    if (!src || busy) return;
+
+    const out = document.createElement('canvas');
+    out.width = src.height;
+    out.height = src.width;
+    const ctx = out.getContext('2d');
+    if (!ctx) return;
+
+    // 用整数矩阵而不是 rotate(π/2)：那个 π/2 的余弦是 6e-17 而不是 0，
+    // 亚像素的偏移会让整张图过一次插值。(a,b,c,d,e,f) = (0,1,-1,0,新宽,0) 把源的
+    // (x,y) 送到目标的 (新宽-y, x)，而新宽正是源的高 —— 这就是顺时针 90°。
+    ctx.imageSmoothingEnabled = false;
+    ctx.setTransform(0, 1, -1, 0, out.width, 0);
+    ctx.drawImage(src, 0, 0);
+
+    frame = out;
+    frameUrl = out.toDataURL('image/jpeg', 0.92);
+
+    // 选框是归一化到帧上的，帧一转它的坐标系也换了，得跟着内容一起挪 ——
+    // 否则用户先框好了再旋转，框住的那块就跑掉了。顺时针 90° 后新图的 x 轴是旧图的 -y 轴：
+    // x' = 1 - (y + h)，y' = x，宽高互换。
+    crop = { x: 1 - (crop.y + crop.h), y: crop.x, w: crop.h, h: crop.w };
+  }
+
+  function clampInt(v: number, lo: number, hi: number): number {
+    return v < lo ? lo : v > hi ? hi : v;
+  }
+
+  // 确认框选。到这一步就定稿：帧被丢掉，框歪了只能重拍。
+  async function confirm() {
+    const src = frame;
+    if (!src || busy) return;
+    busy = true;
+    errorText = '';
+
+    try {
+      // 1) 按选框在**无损帧**上裁子图。归一化 → 像素先在同步段里定下来：
+      //    后面 await 会让出线程，那时用户再拖选框也不该改变这一次提交的内容。
+      //    夹一次边界：四舍五入可能把右边推到帧外一个像素。
+      const px = clampInt(Math.round(crop.x * src.width), 0, src.width - 1);
+      const py = clampInt(Math.round(crop.y * src.height), 0, src.height - 1);
+      const pw = clampInt(Math.round(crop.w * src.width), 1, src.width - px);
+      const ph = clampInt(Math.round(crop.h * src.height), 1, src.height - py);
+
+      const cut = document.createElement('canvas');
+      cut.width = pw;
+      cut.height = ph;
+      const ctx = cut.getContext('2d');
+      if (!ctx) throw new Error('裁图：拿不到 2d 上下文');
+      // 源矩形与目标同尺寸 —— 逐像素搬运，不重采样。
+      ctx.drawImage(src, px, py, pw, ph, 0, 0, pw, ph);
+
+      // PNG 而不是 JPEG：卡片图存的是原始像素，过一次有损编码就再也回不来了
+      // （spec 的 Out of Scope：不做不可逆增强）。
+      const base64 = cut.toDataURL('image/png').split(',')[1];
+      if (!base64) throw new Error('裁图：PNG 编码失败');
+
+      // 2) 四个角点是选框在**裁后那张图**里的位置，顺序固定 左上 → 右上 → 右下 → 左下。
+      //
+      //    选框是轴对齐的矩形，所以这一步今天在几何上是一次**恒等变换** —— 看着像白跑
+      //    一趟，但**不能省**：它是 Go 侧唯一被 fixture 测试覆盖的入口，也是将来改成
+      //    四角可独立拖时前端唯一要动的地方（那时把四个值换成各自的拖动结果即可，
+      //    Go 侧一行都不用改）。
+      const quad: Quad = [
+        { X: 0, Y: 0 }, // 左上
+        { X: pw, Y: 0 }, // 右上
+        { X: pw, Y: ph }, // 右下
+        { X: 0, Y: ph }, // 左下
+      ];
+      const hash = await capture.Rectify(base64, quad);
+
+      // 3) 入库。答案图还没有，第二个参数传空串（spec：手边没答案也先存题图）。
+      //    先 Add 再取图：Add 失败就整个失败，不会留下「文件在、库里没引用」的孤儿。
+      await library.Add(hash, '');
+
+      // 4) 取回成品显示。取的是 Go 侧存的那份（PNG），显示的与落盘的是同一张。
+      const card = await capture.Card(hash);
+
+      cardUrl = `data:image/png;base64,${card}`;
+      // 定稿了：帧与它的显示副本一起丢掉。原图不再保留是刻意的（ADR-0007）。
+      frame = null;
+      frameUrl = null;
+    } catch (err: unknown) {
+      errorText = err instanceof Error ? err.message : String(err);
+    } finally {
+      busy = false;
+    }
+  }
+
+  // 重拍 / 拍下一张：三条状态一起清掉，回到取景。
   function retake() {
+    if (busy) return;
     frame = null;
     frameUrl = null;
+    cardUrl = null;
+    crop = { ...DEFAULT_BOX };
+    errorText = '';
   }
 </script>
 
 <div class="capture" bind:this={root}>
   <video bind:this={video} class="preview" autoplay muted playsinline></video>
 
-  <div class="reticle" aria-hidden="true"></div>
-
-  {#if frameUrl}
+  {#if cardUrl}
+    <!-- 成品。原图已经没了，这里能做的只有继续拍下一道。 -->
     <div class="shot">
-      <img src={frameUrl} alt="刚拍下的画面" />
-      <button class="pill" onclick={retake}>重拍</button>
+      <img class="card" src={cardUrl} alt="刚入库的题图" />
+      <button class="pill" onclick={retake}>拍下一张</button>
+    </div>
+  {:else if frameUrl}
+    <div class="shot" bind:this={stage}>
+      <!-- 底图铺满屏幕：占满整页，只按帧的比例留边（黑底由 .shot 出）。
+           位置由 baseRect 明确给出，与选框共用同一份几何 —— 两边各算一遍迟早会差一点。 -->
+      <img
+        class="base"
+        src={frameUrl}
+        alt="刚拍下的画面"
+        style="left: {baseRect.left}px; top: {baseRect.top}px; width: {baseRect.width}px; height: {baseRect.height}px;"
+      />
+
+      <CropBox rect={baseRect} bind:value={crop} />
+
+      <div class="tools">
+        <button class="pill" onclick={retake} disabled={busy}>重拍</button>
+        <button class="pill go" onclick={confirm} disabled={busy}>{busy ? '处理中…' : '确认'}</button>
+        <button class="pill" onclick={rotate} disabled={busy}>旋转</button>
+      </div>
     </div>
   {:else}
+    <div class="reticle" aria-hidden="true"></div>
     <button class="shutter" onclick={shutter} aria-label="快门"></button>
   {/if}
 
@@ -191,7 +358,7 @@
     background: rgba(255, 255, 255, 0.55);
   }
 
-  /* 抓到的帧铺满整页 —— 与刚看到的取景画面同视野。 */
+  /* 拍完之后的两态（框选 / 成品）都铺满整页，底子全黑。 */
   .shot {
     position: absolute;
     inset: 0;
@@ -201,12 +368,39 @@
     justify-content: center;
     gap: 1.5rem;
     background: #000;
+    user-select: none;
+    -webkit-user-select: none;
   }
-  .shot img {
+
+  /* 帧的位置尺寸由内联的 baseRect 给，这里只管不参与重采样与非拖拽。 */
+  .base {
+    position: absolute;
+    -webkit-user-drag: none;
+  }
+
+  /* 成品卡片图。已经拉正了，按原比例整个装进来即可。 */
+  .card {
     max-width: 100%;
     max-height: 78%;
     object-fit: contain;
     -webkit-user-drag: none;
+  }
+
+  /* 三个控件压在选框蒙版之上（DOM 里在 CropBox 之后，同在 .shot 这个层叠上下文里）。 */
+  .tools {
+    position: absolute;
+    left: 50%;
+    bottom: max(1.5rem, env(safe-area-inset-bottom));
+    translate: -50% 0;
+    /* 整行定宽、三格均分：确认在忙碌时换文案，按钮和整行都不跟着抽一下。 */
+    width: min(calc(100% - 2rem), 24rem);
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  .tools .pill {
+    flex: 1;
+    padding-inline: 0;
   }
 
   .pill {
@@ -224,6 +418,22 @@
   }
   .pill:active {
     background: rgba(244, 246, 251, 0.24);
+  }
+  /* 三个都不可用时要看得出来，否则会以为界面卡死了。 */
+  .pill:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+
+  /* 确认是这一步的主动作，给它一点重量。 */
+  .go {
+    border-color: rgba(244, 246, 251, 0.7);
+    background: rgba(244, 246, 251, 0.85);
+    color: #14161c;
+    font-weight: 600;
+  }
+  .go:active:not(:disabled) {
+    background: #f4f6fb;
   }
 
   .error {

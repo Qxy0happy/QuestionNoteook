@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import Capture from './Capture.svelte';
+  import Library from './Library.svelte';
 
   // 主界面三页，横向排列。拍照居中且是默认页 —— 打开 app 看到的第一个画面就是取景。
   const PAGES = [
@@ -24,6 +25,9 @@
       {#if page.id === 'capture'}
         <!-- 中间这页是取景，挂载即开镜。上面没有引导层，打开 app 直接就在取景。 -->
         <Capture />
+      {:else if page.id === 'library'}
+        <!-- 右页是题库：错题列表 + 点开看题图。切到这一页它自己会重拉一次列表。 -->
+        <Library />
       {:else}
         <span class="page-label">{page.label}</span>
       {/if}
