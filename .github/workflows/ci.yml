@@ -1,0 +1,139 @@
+name: CI
+
+# 每次推到 main、以及每个 PR 都跑。
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# 同一分支连推几次时，把前一次还在跑的取消掉 —— 队列里只留最新那次，
+# 不然连着修三下就要排队等三遍（而前两遍的结果已经没人看了）。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Go：构建、vet、测试 ──
+  #
+  # 唯一有自动化测试的一层（spec 说前端是薄视图、不做自动化测试；那个权衡在 spec 里）。
+  go:
+    name: Go（build / vet / test）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 版本从 go.mod 读，不在这儿再写一遍 —— 两处版本号迟早会对不上，
+      # 而对不上的那天，红的是「本地能过、CI 不能过」这种最难查的错。
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - run: go build ./...
+      - run: go vet ./...
+
+      # -race：这个仓库里有真并发（复习服务的设置缓存要同时应付界面与评级、
+      # 几个服务共用一条连接）。竞态只在跑起来时才现形，静态检查看不见。
+      - run: go test -race -count=1 ./...
+
+  # ── 前端：类型检查 + 构建 ──
+  frontend:
+    name: 前端（svelte-check / build）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      # pnpm 的版本与本地一致（12.4.2）：锁文件的格式跟着它走，版本不同会
+      # 让 --frozen-lockfile 直接失败，而那种失败看起来像「代码坏了」。
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.4.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - run: pnpm install --frozen-lockfile
+
+      # 与本地同一条命令、同一个门槛（有 warning 就红）：本地怎么绿的，CI 就怎么绿。
+      - run: pnpm exec svelte-check --threshold warning
+      - run: pnpm run build
+
+  # ── 绑定：生成结果与 Go 代码一致 ──
+  #
+  # 前端调的每一个 Go 方法都靠 frontend/bindings 那批生成文件（方法号是 Go 侧算出来的）。
+  # 改了 Go 的服务方法却忘了重新生成，前端照样能编译、却在真机上调用失败 ——
+  # 本地没有任何东西会红，所以这条放在 CI 上。
+  bindings:
+    name: 绑定（生成结果是最新的）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # 版本与本地、与 build/Taskfile.yml 里那套一致。
+      - run: go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.22
+
+      - name: 重新生成一遍
+        run: wails3 generate bindings -f '' -clean=true -ts -i
+
+      - name: 与仓库里那份比对
+        run: |
+          git diff --stat -- frontend/bindings
+          git diff --exit-code -- frontend/bindings
+
+  # ── Android：真编一次 .so 与 APK ──
+  #
+  # 这个应用只有安卓一条出货路径，而上面三个作业都碰不到它的一半：
+  # Java 那边（MainActivity 里的 WebView 配置、键盘与缩放）只有 gradle 编得到，
+  # .so 那一半要 NDK 才编得出来。本地靠 `wails3 task android:run:device` 兜着，
+  # CI 里这条是它的替身。
+  android:
+    name: Android（.so + APK）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: android-actions/setup-android@v3
+      # NDK 的版本写死：Taskfile 挑的是「装得最新的那个」，CI 上装几个就会挑错。
+      - run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.4.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: frontend
+      - run: go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.22
+
+      # 这一条把前端打进 .so、并编出 jniLibs/arm64-v8a/libwails.so
+      # （它的 deps 里就有 build:frontend 与 compile:go:shared）。
+      - run: wails3 task android:build ARCH=arm64
+
+      # Java 那一半。走 Taskfile 里的任务而不是直接 gradlew：那边处理了
+      # 「Windows 要 cmd /c .\gradlew.bat、其它平台要 ./gradlew」这层差异。
+      - run: wails3 task android:assemble:apk
+
+      # 留一份 APK：CI 编出来的这个能直接装上真机试（私有仓库，只有你看得到）。
+      - uses: actions/upload-artifact@v4
+        with:
+          name: questionbook-debug-apk
+          path: bin/questionbook.apk
+          if-no-files-found: error
