@@ -4,7 +4,10 @@ includes:
   common: ../Taskfile.yml
 
 vars:
-  APP_ID: '{{.APP_ID | default "com.wails.app"}}'
+  # 必须与 app/build.gradle 的 applicationId 一致，否则 uninstall 和 am start 都打空
+  # （卸载无效果、启动报 "Activity class does not exist"）。
+  # Activity 的类名仍然是 com.wails.app.MainActivity —— namespace 刻意没改，见那个文件里的注释。
+  APP_ID: '{{.APP_ID | default "com.questionbook.app"}}'
   MIN_SDK: '21'
   TARGET_SDK: '35'
   # The emulator runs the host architecture; physical devices are arm64

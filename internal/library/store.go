@@ -6,6 +6,10 @@
 //
 // 模式（schema）版本记在 SQLite 自带的 PRAGMA user_version 里，Open 时按序号补齐
 // 缺失的迁移。加表 / 加列只需往 migrations.go 的列表末尾追加一条。
+//
+// 同一个库文件上还有别的表（标签是头一张），它们的读写代码在各自的包里
+// （internal/tags），只有迁移与「按标签筛错题」这条查询留在这里 ——
+// 前者是因为这个库只有一套迁移机制，后者是因为它要读 questions 表。
 package library
 
 import (
@@ -15,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	// 纯 Go 实现的 SQLite 驱动，注册名 "sqlite"。
 	// 选它而不是 mattn/go-sqlite3，是为了安卓交叉编译不沾 cgo。
@@ -69,6 +74,69 @@ func Open(path string) (*Store, error) {
 // Close 关掉底层连接池。之后再调用本对象的方法都会失败。
 func (s *Store) Close() error {
 	return s.db.Close()
+}
+
+// DB 返回底层连接池，供同一个库文件上的其它表共用（标签，以后还有复习状态等）。
+//
+// 那些包不该再 Open 一次同一个文件：WAL 下两条连接虽然能跑，但没有理由让两个池
+// 去抢同一把写锁。对方拿到的是同一条连接，事务与锁的语义因此与这里一致。
+func (s *Store) DB() *sql.DB { return s.db }
+
+// ListQuestionsTaggedWith 返回挂了 tagIDs 里任一标签的错题，新的在前。
+//
+// 筛一个标签时**连它的子孙一起算**：点「数学」要带出它下面所有章节与知识点的题，
+// 否则三层树在筛选上就没有意义了。想只筛某个节点本身，传叶子标签。
+//
+// tagIDs 为空表示**不筛**，返回全部错题 —— 界面上「一个标签都没勾」就是这个意思，
+// 于是筛与不筛是同一个调用。传了不存在的 id 不算错，只是筛不出东西
+// （标签可能刚被别处删掉，那是并发下的正常情况）。
+func (s *Store) ListQuestionsTaggedWith(tagIDs []int64) ([]Question, error) {
+	if len(tagIDs) == 0 {
+		return s.ListQuestions()
+	}
+
+	// 子树用递归 CTE 算，筛选与展开在同一条语句里完成 —— 不必先把子孙捞回来再拼 IN。
+	args := make([]any, len(tagIDs))
+	for i, id := range tagIDs {
+		args[i] = id
+	}
+	rows, err := s.db.Query(
+		`WITH RECURSIVE subtree(id) AS (
+			SELECT id FROM tags WHERE id IN (`+placeholders(len(tagIDs))+`)
+			UNION
+			SELECT t.id FROM tags t JOIN subtree s ON t.parent_id = s.id
+		 )
+		 SELECT DISTINCT q.id, q.question_hash, q.answer_hash, q.created_at
+		 FROM questions q JOIN question_tags qt ON qt.question_id = q.id
+		 WHERE qt.tag_id IN (SELECT id FROM subtree)
+		 ORDER BY q.created_at DESC, q.id DESC`,
+		args...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("按标签筛错题: %w", err)
+	}
+	defer rows.Close()
+
+	qs := []Question{} // 空切片而不是 nil：前端拿到的是 []，不是 null
+	for rows.Next() {
+		q, err := scanQuestion(rows)
+		if err != nil {
+			return nil, fmt.Errorf("按标签筛错题: %w", err)
+		}
+		qs = append(qs, q)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("按标签筛错题: %w", err)
+	}
+	return qs, nil
+}
+
+// placeholders 生成 n 个 "?"，给动态 IN 列表用。
+//
+// 动态的只是**个数**，值仍然走占位符传，不拼进 SQL。
+// tags 包那边也留了一份：三行的东西不值得为它开一个包。
+func placeholders(n int) string {
+	return strings.TrimSuffix(strings.Repeat("?,", n), ",")
 }
 
 // dsn 拼出驱动要的连接串。

@@ -8,7 +8,20 @@
   import * as capture from '../bindings/questionbook/internal/capture/service.js';
   import * as library from '../bindings/questionbook/internal/library/service.js';
   import type { Quad } from '../bindings/questionbook/internal/capture/models.js';
+  import type { Question } from '../bindings/questionbook/internal/library/models.js';
   import CropBox, { type Box } from './CropBox.svelte';
+
+  interface Props {
+    // 补拍答案图：传那道**已有的**错题的 id。不传（null）就是拍一道新错题 —— 本页的常态。
+    //
+    // 补拍走的是同一条采集路径（同一次框选、同一套拉正与内容寻址落盘），
+    // 只是 Go 侧把落点从「新建一道错题」换成「这道题的 answer_hash」。
+    answerFor?: number | null;
+    // 补拍完、用户按了「完成」之后回调，把更新后的那道错题交出去（题库页据此刷新）。
+    onAnswerAttached?: (q: Question) => void;
+  }
+
+  let { answerFor = null, onAnswerAttached }: Props = $props();
 
   // 选框初值：居中、占七成。留出的那一圈不只是好看 —— 看得见框外，才判断得出框歪没歪。
   const DEFAULT_BOX: Box = { x: 0.15, y: 0.15, w: 0.7, h: 0.7 };
@@ -28,11 +41,16 @@
   let stageH = $state(0);
   // 选框，归一化到帧上（定义见 CropBox 的 Box）。
   let crop = $state<Box>({ ...DEFAULT_BOX });
-  // 入库后按 hash 取回的成品题图（PNG data URL）。
+  // 入库后按 hash 取回的成品图（题图或答案图，PNG data URL）。
   let cardUrl = $state<string | null>(null);
   // 已经采集成功、只差把成品取回来显示的题图 hash（null = 这一趟还没采）。
   // 采集一次成功，题就在库里了，所以重试只能重取图 —— 再采一次会多出一道错题。
   let savedHash: string | null = null;
+  // 补拍答案图那一条路上已经写进库的那道错题（null = 还没补）。
+  // 用途与 savedHash 相同：成了之后重试只能重取图，别再写一遍。
+  let attached = $state<Question | null>(null);
+  // 上一次的补拍目标，用来发现「目标换了」这件事。它不参与渲染，所以不是 $state。
+  let lastAnswerFor: number | null = null;
   // 交给 Go 的那一趟还没回来。期间锁住三个按钮，免得重复提交。
   let busy = $state(false);
   let errorText = $state('');
@@ -125,6 +143,14 @@
     };
   });
 
+  // 补拍目标一变（从「拍新题」切到某道题，或换成另一道）就回到取景：
+  // 上一次留下的半张框不该串到这一次。
+  $effect(() => {
+    if (answerFor === lastAnswerFor) return;
+    lastAnswerFor = answerFor;
+    clearShot();
+  });
+
   // 快门：按预览的 cover 裁出可见区域，再按**源像素密度**落到 canvas 上。
   // 不裁切会让预览与成片视野不一致（竖屏看的是窄带，拍下来却是一整张横画幅），
   // 而那个不一致正好毁掉取景框的对准意义。不降采样则是因为下游要读手写题。
@@ -156,8 +182,9 @@
 
     crop = { ...DEFAULT_BOX };
     cardUrl = null;
-    // 新的一张帧：上一次采集留下的那个 hash 与它无关了。
+    // 新的一张帧：上一次采集留下的那几个结果与它无关了。
     savedHash = null;
+    attached = null;
     frame = canvas;
     frameUrl = canvas.toDataURL('image/jpeg', 0.92);
   }
@@ -236,20 +263,34 @@
         { X: 0, Y: ph }, // 左下
       ];
 
-      // 3) 一趟做完：拉正 + 按内容 hash 落盘 + 建错题，回来的是**新错题**本身。
-      //    中间没有第二次 IPC，也就没有「题图落了盘、错题没建出来」的空子。
-      //
-      //    它成功那一刻题就已经在库里了，所以这一趟只允许走一次：重试只能重取图，
-      //    再采一次会为同一张题图**再建一道错题**（dfc337e 修的就是这个）。
-      //    重试时选框已经不起作用了 —— 题是按上一次的框定稿的，想改框只能重拍。
-      const hash = savedHash ?? (await capture.Capture(base64, quad)).QuestionHash;
-      savedHash = hash;
+      if (answerFor != null) {
+        // 3a) 补拍答案图：拉正 + 落盘 + 写到这道题的 answer_hash 上，同样是一趟做完。
+        //     采集那侧给的是「新错题」，这里给的是「更新后的那道错题」—— 差别只在落点。
+        //
+        //     它一次成功答案就已经在库里了，所以重试只重取图；真要把这张换掉，
+        //     按下面那两个按钮（重拍 / 完成）走，而不是在这里偷偷再写一遍。
+        const q = attached ?? (await library.AttachAnswer(answerFor, base64, quad));
+        attached = q;
 
-      // 4) 取回成品题图给界面看。题图的读归题库，采集那边已经没有读路径了。
-      const card = await library.QuestionImage(hash);
+        // 4a) 取回成品答案图给界面看。读图同样归题库。
+        const shown = await library.AnswerImage(q.AnswerHash);
+        cardUrl = `data:image/png;base64,${shown}`;
+      } else {
+        // 3b) 一趟做完：拉正 + 按内容 hash 落盘 + 建错题，回来的是**新错题**本身。
+        //     中间没有第二次 IPC，也就没有「题图落了盘、错题没建出来」的空子。
+        //
+        //     它成功那一刻题就已经在库里了，所以这一趟只允许走一次：重试只能重取图，
+        //     再采一次会为同一张题图**再建一道错题**（dfc337e 修的就是这个）。
+        //     重试时选框已经不起作用了 —— 题是按上一次的框定稿的，想改框只能重拍。
+        const hash = savedHash ?? (await capture.Capture(base64, quad)).QuestionHash;
+        savedHash = hash;
 
-      cardUrl = `data:image/png;base64,${card}`;
-      savedHash = null;
+        // 4b) 取回成品题图给界面看。题图的读归题库，采集那边已经没有读路径了。
+        const card = await library.QuestionImage(hash);
+        cardUrl = `data:image/png;base64,${card}`;
+        savedHash = null;
+      }
+
       // 定稿了：帧与它的显示副本一起丢掉。原图不再保留是刻意的（ADR-0007）。
       frame = null;
       frameUrl = null;
@@ -260,17 +301,32 @@
     }
   }
 
-  // 重拍 / 拍下一张：几条状态一起清掉，回到取景。
-  // 注意这不是「撤销」：上一张只要采集成功过，它就已经在题库里了（取图失败也拦不住），
+  // 清本页的显示状态，回到取景。
+  // 注意这不是「撤销」：上一张只要采集成功过，它就已经在库里了（取图失败也拦不住），
   // 这里清的只是本页的显示状态。
-  function retake() {
-    if (busy) return;
+  function clearShot() {
     frame = null;
     frameUrl = null;
     cardUrl = null;
     savedHash = null;
+    attached = null;
     crop = { ...DEFAULT_BOX };
     errorText = '';
+  }
+
+  // 重拍 / 拍下一张。
+  function retake() {
+    if (busy) return;
+    clearShot();
+  }
+
+  // 补拍完收工：把更新后的那道错题交给外面（题库页据此刷新），本页回到取景。
+  // 换下来的旧答案图由 Go 侧回收 —— 重拍过的那些在这里才算真的落地。
+  function finishAnswer() {
+    if (busy) return;
+    const q = attached;
+    clearShot();
+    if (q) onAnswerAttached?.(q);
   }
 </script>
 
@@ -278,10 +334,18 @@
   <video bind:this={video} class="preview" autoplay muted playsinline></video>
 
   {#if cardUrl}
-    <!-- 成品。原图已经没了，这里能做的只有继续拍下一道。 -->
+    <!-- 成品。原图已经没了，这里能做的只有继续拍下一道（补拍则是收工或重来）。 -->
     <div class="shot">
-      <img class="card" src={cardUrl} alt="刚入库的题图" />
-      <button class="pill" onclick={retake}>拍下一张</button>
+      <img class="card" src={cardUrl} alt={answerFor != null ? '刚补拍的答案图' : '刚入库的题图'} />
+      {#if answerFor != null}
+        <div class="done">
+          <!-- 重拍就是再走一遍：新的顶掉旧的，旧的那张没人引用就被回收。 -->
+          <button class="pill" onclick={retake}>重拍</button>
+          <button class="pill go" onclick={finishAnswer}>完成</button>
+        </div>
+      {:else}
+        <button class="pill" onclick={retake}>拍下一张</button>
+      {/if}
     </div>
   {:else if frameUrl}
     <div class="shot" bind:this={stage}>
@@ -304,6 +368,10 @@
     </div>
   {:else}
     <div class="reticle" aria-hidden="true"></div>
+    {#if answerFor != null}
+      <!-- 补拍态要看得出来自己在干什么，否则和拍新题长得一模一样。 -->
+      <p class="mode">补拍答案图</p>
+    {/if}
     <button class="shutter" onclick={shutter} aria-label="快门"></button>
   {/if}
 
@@ -412,6 +480,34 @@
     max-height: 78%;
     object-fit: contain;
     -webkit-user-drag: none;
+  }
+
+  /* 补拍态的小标签。压在快门上方，不跟顶上那条错误提示抢位置。 */
+  .mode {
+    position: absolute;
+    left: 50%;
+    /* 快门 4.5rem 高、离底 1.75rem，这里再往上让一格。 */
+    bottom: calc(max(1.75rem, env(safe-area-inset-bottom)) + 5.5rem);
+    translate: -50% 0;
+    margin: 0;
+    padding: 0.35rem 0.9rem;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, 0.55);
+    color: #f4f6fb;
+    font-size: 0.85rem;
+    pointer-events: none;
+  }
+
+  /* 补拍完成后的一对动作，宽度与框选页那排对齐，免得跳一下。 */
+  .done {
+    width: min(calc(100% - 2rem), 24rem);
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+  }
+  .done .pill {
+    flex: 1;
+    padding-inline: 0;
   }
 
   /* 三个控件压在选框蒙版之上（DOM 里在 CropBox 之后，同在 .shot 这个层叠上下文里）。 */

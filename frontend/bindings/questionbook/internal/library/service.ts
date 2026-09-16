@@ -36,9 +36,26 @@ export function AnswerImage(hash: string): $CancellablePromise<string> {
 }
 
 /**
- * Delete 删掉一道错题，并返回被删掉的那条记录 —— 调用方据此知道该回收哪两张题图。
+ * AttachAnswer 给一道**已有的**错题补上答案图：收一张帧（PNG 或 JPEG 的 base64）与四个角点，
+ * 透视拉正后按内容 hash 落盘，再把 hash 写到这道题的 answer_hash 上，返回更新后的那条记录。
  * 
- * 注意它只删库里的行，不碰图片文件：同一张题图可能被多道题引用，回收是引用计数的事。
+ * 它走的是与题图**完全相同**的那条采集路径 —— 拉正与内容寻址落盘都在采集那边，这里只把
+ * 落点从「新建一道错题」换成「这道题的 answer_hash」（spec：答案图与题图同一条路径，只是落点不同）。
+ * 
+ * 角点坐标是**相对传入这张图**的像素坐标，顺序固定为 左上 → 右上 → 右下 → 左下（见 Quad）。
+ * 重拍答案图就是再调一次：换下来的旧图若已无人引用会被回收。
+ */
+export function AttachAnswer(id: number, frameBase64: string, quad: $models.Quad): $CancellablePromise<$models.Question> {
+    return $Call.ByID(1262705046, id, frameBase64, quad);
+}
+
+/**
+ * Delete 删掉一道错题，顺带回收它的题图与答案图，并返回被删掉的那条记录。
+ * 
+ * 回收是引用计数式的：同一个 hash 可能还被别的错题引用着（去重发生在文件那一层，
+ * 见 ADR-0004），所以只有数到没人用了才真的删文件。
+ * 
+ * 没接上 ImageFiles 时只删库里的行，图片留在盘上 —— 那是些没人引用的孤儿。
  */
 export function Delete(id: number): $CancellablePromise<$models.Question> {
     return $Call.ByID(4190043338, id);

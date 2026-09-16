@@ -6,8 +6,12 @@ export {
     Service
 };
 
+export {
+    Level
+} from "./models.js";
+
 export type {
-    Point,
-    Quad,
-    Question
+    DeleteResult,
+    QuestionTags,
+    Tag
 } from "./models.js";

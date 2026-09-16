@@ -91,6 +91,46 @@ func (s *Store) ListQuestions() ([]Question, error) {
 	return qs, nil
 }
 
+// SetAnswerHash 把一道错题的答案图换成 answerHash，返回更新后的那条记录。
+// 传空串表示撤掉答案图（「还没拍」就是空串）。id 不存在时返回 ErrNotFound。
+//
+// 只改库里的行，不碰图片文件：图片在库外，什么时候能删得看过引用情况
+// （见 Service.reclaimImage）。
+func (s *Store) SetAnswerHash(id int64, answerHash string) (Question, error) {
+	// 先确认这道题在：UPDATE 只回一个影响行数，分不清「没这道题」和别的情况。
+	// DeleteQuestion 也是先探再动的。
+	if _, err := s.GetQuestion(id); err != nil {
+		return Question{}, err
+	}
+
+	if _, err := s.db.Exec(
+		`UPDATE questions SET answer_hash = ? WHERE id = ?`, answerHash, id,
+	); err != nil {
+		return Question{}, fmt.Errorf("写答案图 hash: %w", err)
+	}
+	return s.GetQuestion(id)
+}
+
+// CountQuestionsWithHash 数还有几道错题引用着这个图片 hash。
+//
+// 题图列与答案图列都算：去重是内容级的（ADR-0004），同一个 hash 完全可能既是这道题的
+// 题图、又是那道题的答案图。回收图片之前问的就是这一句。
+func (s *Store) CountQuestionsWithHash(hash string) (int, error) {
+	if hash == "" {
+		// 空串不是图片：照 SQL 直译会把「还没拍答案」的题全数进来。
+		return 0, nil
+	}
+
+	var n int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM questions WHERE question_hash = ? OR answer_hash = ?`,
+		hash, hash,
+	).Scan(&n); err != nil {
+		return 0, fmt.Errorf("数引用 %s 的错题: %w", hash, err)
+	}
+	return n, nil
+}
+
 // DeleteQuestion 删掉一道错题，并返回被删掉的那条记录 —— 调用方据此知道该回收
 // 哪两张图。id 不存在时返回 ErrNotFound。
 //

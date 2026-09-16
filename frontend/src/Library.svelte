@@ -5,8 +5,15 @@
 
   import * as Library from '../bindings/questionbook/internal/library/service';
   import type { Question } from '../bindings/questionbook/internal/library/models';
+  import * as Tags from '../bindings/questionbook/internal/tags/service';
+  import type { Tag } from '../bindings/questionbook/internal/tags/models';
+  import AnswerBadge from './AnswerBadge.svelte';
+  import TagFilter from './TagFilter.svelte';
 
   // 三页是同时挂载的，切到这一页才值得拉一次数据。
+  // 题库页发起的「补拍答案图」：把这道题交给上层（App），由它切到取景页并进入补拍模式。
+  let { onCaptureAnswer }: { onCaptureAnswer?: (q: Question) => void } = $props();
+
   let root = $state<HTMLElement | null>(null);
 
   let questions = $state<Question[]>([]);
@@ -24,6 +31,24 @@
   let confirming = $state(false);
   let busy = $state(false);
 
+  // ── 标签 ──
+  // 词表是平的（父由 ParentID 指出），怎么画成三层树是 TagFilter 的事。
+  let allTags = $state<Tag[]>([]);
+  // 当前筛中的标签；空数组 = 不筛。两层界面各用一份：列表页筛，详情页给单道题打。
+  let picked = $state<number[]>([]);
+  let openedTagIDs = $state<number[]>([]);
+  let showFilter = $state(false);
+  let showTags = $state(false);
+  // 新学科的名字（顶层）。章节与知识点由识别那边建，这里只管用户自己填的学科。
+  let newSubject = $state('');
+  // 标签相关的失败都归这儿：建学科没成、打标签没写进去。
+  let tagError = $state('');
+
+  // 同一个转换在下面出现好几处，收成一个 —— 都是要把 unknown 变成能给用户看的一句话。
+  function errorMessage(err: unknown): string {
+    return err instanceof Error ? err.message : String(err);
+  }
+
   // 取回来的题图按 hash 存一份：同一道题反复开合不必重走一次 IPC。
   // 一张题图撑死几百 KB，错题本量小，先不做淘汰。
   const cards = new Map<string, string>();
@@ -32,10 +57,11 @@
     loading = true;
     try {
       // 后端已按创建时间倒序排好（新的在前），这里不再排一次 —— 再排会跟它的并列规则打架。
-      questions = (await Library.List()) ?? [];
+      // 空数组 = 不筛 = 全部错题，点父标签会自动带上子孙，所以筛与不筛是同一个调用。
+      questions = (await Tags.QuestionsByTags(picked)) ?? [];
       listError = '';
     } catch (err) {
-      listError = err instanceof Error ? err.message : String(err);
+      listError = errorMessage(err);
     } finally {
       loading = false;
     }
@@ -49,7 +75,11 @@
     // 默认 root（视口）已经算上祖先滚动容器的裁剪，滑出 .pages 时比率就是 0。
     const io = new IntersectionObserver((entries) => {
       for (const entry of entries) {
-        if (entry.isIntersecting) void refresh();
+        if (entry.isIntersecting) {
+          void refresh();
+          // 标签词表跟着一起刷：识别那边（票据 09）会在后台往里加知识点，重进本页时就该看到。
+          void refreshTags();
+        }
       }
     });
     io.observe(el);
@@ -61,6 +91,9 @@
     openedError = '';
     actionError = '';
     confirming = false;
+    showTags = false;
+    openedTagIDs = [];
+    void loadTags(q.ID);
     openedUrl = cards.get(q.QuestionHash) ?? null;
     if (openedUrl) return;
 
@@ -77,7 +110,82 @@
       // 取图是异步的：这中间用户可能已经返回、或换了一道题 —— 别把旧图贴上去。
       if (opened?.ID === q.ID) openedUrl = url;
     } catch (err) {
-      if (opened?.ID === q.ID) openedError = err instanceof Error ? err.message : String(err);
+      if (opened?.ID === q.ID) openedError = errorMessage(err);
+    }
+  }
+
+  // 「补拍答案图」交给上层 —— 采集界面在另一页，题库页不该知道它怎么被拉起。
+  function captureAnswer() {
+    if (opened) onCaptureAnswer?.(opened);
+  }
+
+  // ── 标签：取词表、筛列表、给一道题打标签 ──
+
+  async function refreshTags() {
+    try {
+      allTags = (await Tags.List()) ?? [];
+      tagError = '';
+    } catch (err) {
+      tagError = errorMessage(err);
+    }
+  }
+
+  // 筛选面板勾选变了：先记下筛了什么，再重拉一次列表。
+  function pickTags(ids: number[]) {
+    picked = ids;
+    void refresh();
+  }
+
+  async function createSubject() {
+    const name = newSubject.trim();
+    if (!name) return;
+    try {
+      // 0 = 顶层：没有父的标签就是学科，层级由这一条推出来，不用自己算。
+      await Tags.Create(0, name);
+      newSubject = '';
+      tagError = '';
+      await refreshTags();
+    } catch (err) {
+      // 同级重名会以错误回来（后端不做 upsert），那就把它说出来，别静默吞掉。
+      tagError = errorMessage(err);
+    }
+  }
+
+  function onSubjectKey(e: KeyboardEvent) {
+    if (e.key === 'Enter') void createSubject();
+  }
+
+  async function loadTags(id: number) {
+    try {
+      const ts = (await Tags.TagsOfQuestion(id)) ?? [];
+      // 取标签是异步的：这中间用户可能已经返回或换了一道题，别把旧题的标签贴上去。
+      if (opened?.ID === id) openedTagIDs = ts.map((t) => t.ID);
+    } catch (err) {
+      if (opened?.ID === id) tagError = errorMessage(err);
+    }
+  }
+
+  function toggleTags() {
+    showTags = !showTags;
+    tagError = '';
+  }
+
+  // 勾选变了就整体替换这道题的标签，不做「增删一条」—— 面板给的本来就是全新的整份数组。
+  function saveTags(ids: number[]) {
+    const q = opened;
+    if (!q) return;
+    openedTagIDs = ids; // 先上屏：勾选立刻要有反馈，写库在下面
+    void writeTags(q.ID, ids);
+  }
+
+  async function writeTags(id: number, ids: number[]) {
+    try {
+      await Tags.SetQuestionTags(id, ids);
+      tagError = '';
+    } catch (err) {
+      tagError = errorMessage(err);
+      // 没写进去就把这道题真实的标签读回来 —— 界面不该停在一个假的勾选状态上。
+      await loadTags(id);
     }
   }
 
@@ -87,6 +195,9 @@
     openedError = '';
     actionError = '';
     confirming = false;
+    showTags = false;
+    openedTagIDs = [];
+    tagError = '';
   }
 
   function startConfirm() {
@@ -113,7 +224,7 @@
       await refresh();
     } catch (err) {
       // 删失败就留在原题上把话说出来，别让用户以为删掉了。
-      actionError = err instanceof Error ? err.message : String(err);
+      actionError = errorMessage(err);
     } finally {
       busy = false;
     }
@@ -148,8 +259,21 @@
       {/if}
     </header>
 
+    <!-- 题图上的两个动作单起一行：顶栏挤着「返回 + 时间 + 删除」，再塞两个进去就点不准了。 -->
+    <div class="actions">
+      <button class="ghost" onclick={captureAnswer}>
+        {opened.AnswerHash ? '重拍答案图' : '补拍答案图'}
+      </button>
+      <button class="ghost" class:on={openedTagIDs.length > 0} onclick={toggleTags}>
+        标签{openedTagIDs.length > 0 ? ` ${openedTagIDs.length}` : ''}
+      </button>
+    </div>
+
     {#if actionError}
       <p class="banner">{actionError}</p>
+    {/if}
+    {#if tagError}
+      <p class="banner">{tagError}</p>
     {/if}
 
     <div class="stage">
@@ -161,13 +285,40 @@
         <p class="hint">正在取题图…</p>
       {/if}
     </div>
+
+    {#if showTags}
+      <!-- 面板跟题图并排存在：打标签的时候得看得见题，否则等于闭着眼睛分类。 -->
+      <div class="panel">
+        <TagFilter tags={allTags} selected={openedTagIDs} onSelect={saveTags} />
+      </div>
+    {/if}
   {:else}
     <header class="bar">
       <span class="bar-title">题库</span>
       {#if questions.length > 0}
-        <span class="count">{questions.length} 道</span>
+        <span class="count">{picked.length > 0 ? `筛出 ${questions.length} 道` : `${questions.length} 道`}</span>
       {/if}
+      <button class="ghost" class:on={picked.length > 0} onclick={() => (showFilter = !showFilter)}>
+        筛选{picked.length > 0 ? ` ${picked.length}` : ''}
+      </button>
     </header>
+
+    {#if tagError}
+      <p class="banner">{tagError}</p>
+    {/if}
+
+    {#if showFilter}
+      <div class="panel">
+        <TagFilter tags={allTags} selected={picked} onSelect={pickTags} />
+
+        <!-- 顶层学科由用户自己填（预置的四门只是初始值），所以这里得有个入口。
+             章节与知识点由识别那边建，这一格只管学科。 -->
+        <div class="new-subject">
+          <input bind:value={newSubject} placeholder="新建学科" onkeydown={onSubjectKey} />
+          <button class="ghost" onclick={createSubject} disabled={!newSubject.trim()}>添加</button>
+        </div>
+      </div>
+    {/if}
 
     {#if listError}
       <p class="hint error">{listError}</p>
@@ -184,9 +335,7 @@
           <li>
             <button class="row" onclick={() => open(q)}>
               <span class="row-time">{formatTime(q.CreatedAt)}</span>
-              <span class="row-meta" class:missing={!q.AnswerHash}>
-                {q.AnswerHash ? '有答案图' : '缺答案图'}
-              </span>
+              <AnswerBadge q={q} />
             </button>
           </li>
         {/each}
@@ -291,14 +440,46 @@
     font-size: 1rem;
     font-weight: 600;
   }
-  .row-meta {
-    flex: none;
-    font-size: 0.8rem;
-    color: rgba(244, 246, 251, 0.55);
+  /* 「有答案图 / 缺答案图」那一小条的样式跟着 AnswerBadge 走，这里不再留一份。 */
+
+  /* 顶栏下面那行动作（补拍答案图 / 标签）。 */
+  .actions {
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.6rem 1rem 0;
   }
-  /* 缺答案图的题标记出来，这样知道该去补（story 10）。 */
-  .row-meta.missing {
-    color: rgba(255, 200, 130, 0.8);
+
+  /* 有一项「开着」的按钮：筛选开着、或者这道题有标签。不改变形状，只换颜色。 */
+  .ghost.on {
+    border-color: rgba(130, 200, 255, 0.6);
+    color: #9fd4ff;
+  }
+
+  /* 筛选面板与打标签面板共用同一格。树自己会滚（TagFilter 里封了 40vh），这里不再套一层。 */
+  .panel {
+    flex: 0 0 auto;
+    padding: 0.75rem 1rem;
+    border-top: 1px solid rgba(244, 246, 251, 0.1);
+  }
+
+  .new-subject {
+    display: flex;
+    gap: 0.5rem;
+    margin-top: 0.6rem;
+  }
+  .new-subject input {
+    flex: 1;
+    min-width: 0;
+    padding: 0.4rem 0.8rem;
+    border: 1px solid rgba(244, 246, 251, 0.24);
+    border-radius: 999px;
+    background: rgba(244, 246, 251, 0.06);
+    color: #f4f6fb;
+    font: inherit;
+    font-size: 0.9rem;
+  }
+  .new-subject input::placeholder {
+    color: rgba(244, 246, 251, 0.4);
   }
 
   .stage {
