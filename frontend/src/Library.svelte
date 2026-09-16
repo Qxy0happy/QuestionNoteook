@@ -119,6 +119,82 @@
   // 一张图撑死几百 KB，错题本量小，先不做淘汰。
   const cards = new Map<string, string>();
 
+  // ── 左栏宽度（用户可拖）──
+  //
+  // 默认交给 CSS 那个 `clamp(8rem, 36vw, 11rem)`：它按屏宽算，换设备、转屏都自适应。
+  // **只有用户亲手拖过之后**才钉成具体像素并存下来 —— 那之后就该听他的，不再跟着 vw 走。
+  //
+  // 存 localStorage：这个 WebView 的存储跟着应用数据走（重启在、卸载没），
+  // 所以「上次调多宽」记得住。读失败（存储被禁之类）就当没存过、用默认。
+  const SIDE_WIDTH_KEY = 'library.sideWidth';
+
+  function readSavedSideWidth(): number | null {
+    try {
+      const raw = localStorage.getItem(SIDE_WIDTH_KEY);
+      if (raw === null) return null;
+      const n = Number(raw);
+      return Number.isFinite(n) && n > 0 ? n : null;
+    } catch {
+      return null;
+    }
+  }
+
+  let sideWidth = $state<number | null>(readSavedSideWidth());
+  let browseEl = $state<HTMLElement | null>(null);
+  // 拖拽中的快照。每次 move 都从它重算，不做增量累加（累加会被每一次舍入咬掉一点）。
+  // 它不参与渲染，所以是普通变量而不是 $state。
+  let resizeFrom: { x: number; width: number } | null = null;
+
+  // 左右两头的边界：左栏最窄 8rem（再窄树里的名字只剩两个字、点不准），
+  // 列表那边至少留 7rem（拖到底会把列表挤没）。
+  function sideLimits(): { min: number; max: number } {
+    const rem = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16;
+    const total = browseEl?.getBoundingClientRect().width ?? 0;
+    const min = 8 * rem;
+    return { min, max: Math.max(min, total - 7 * rem) };
+  }
+
+  // 拖分界条。三件事少一件都会坏：
+  //   (1) 指针捕获 —— 手指滑出那条窄条、甚至滑出屏幕，move 事件照样回得来；
+  //   (2) CSS 上的 `touch-action: none` —— 否则这根手指的横滑会被外层翻页手势抢走，
+  //       变成翻到题库/复习页（与应用里选框角柄同一个道理）；
+  //   (3) preventDefault。
+  function startResize(e: PointerEvent) {
+    const side = browseEl?.querySelector<HTMLElement>('.side');
+    if (!side) return;
+    e.preventDefault();
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    resizeFrom = { x: e.clientX, width: side.getBoundingClientRect().width };
+  }
+
+  function resize(e: PointerEvent) {
+    const from = resizeFrom;
+    if (!from) return;
+    const { min, max } = sideLimits();
+    sideWidth = Math.round(Math.min(max, Math.max(min, from.width + (e.clientX - from.x))));
+  }
+
+  function endResize() {
+    if (!resizeFrom) return;
+    resizeFrom = null;
+    try {
+      if (sideWidth !== null) localStorage.setItem(SIDE_WIDTH_KEY, String(sideWidth));
+    } catch {
+      // 存不下就算了：这一次拖的宽度照用，只是下次打开回到默认。
+    }
+  }
+
+  // 双击分界条 = 回到默认（那个跟着屏宽走的 clamp）。触屏上双击不一定触发，
+  // 所以它只是鼠标/桌面上顺手的一个复位；触屏往回拖到差不多宽即可。
+  function resetSideWidth() {
+    sideWidth = null;
+    try {
+      localStorage.removeItem(SIDE_WIDTH_KEY);
+    } catch {
+      // 同上
+    }
+  }
+
   async function refresh() {
     loading = true;
     try {
@@ -578,9 +654,10 @@
     {/if}
 
     <!-- 「未打标签」那一页没有树可画（一条标签都没挂，没有可筛的），整幅宽度给列表。 -->
-    <div class="browse">
+    <div class="browse" bind:this={browseEl}>
       {#if activeSubject}
-        <aside class="side">
+        <!-- 宽度默认交给 CSS 那个 clamp（跟着屏宽走）；用户亲手拖过分界条之后由 style 钉住。 -->
+        <aside class="side" style:width={sideWidth === null ? null : `${sideWidth}px`}>
           <!-- 与详情页打标签用的是同一棵树：章节与知识点交给它画，勾选与半选照旧。
                fill 让它撑满这一列、自己滚；标题写学科名，省得再猜这列筛的是哪一门。 -->
           <TagFilter
@@ -591,6 +668,20 @@
             fill
           />
         </aside>
+
+        <!-- 分界条：拖它改左栏宽度，双击复位。10px 的命中区只画 1px 的线 ——
+             细线手指按不住，宽的又难看。 -->
+        <div
+          class="splitter"
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="拖动调整分类树的宽度（双击复位）"
+          onpointerdown={startResize}
+          onpointermove={resize}
+          onpointerup={endResize}
+          onpointercancel={endResize}
+          ondblclick={resetSideWidth}
+        ></div>
       {/if}
 
       <div class="listpane">
@@ -722,18 +813,53 @@
     min-height: 0;
     display: flex;
   }
-  /* 左侧树的宽度：手机竖屏（主场景，360–430px 宽）下取 36vw ≈ 130–155px，
+  /* 左侧树的**默认**宽度：手机竖屏（主场景，360–430px 宽）下取 36vw ≈ 130–155px，
      给列表留下约 64%。行里只有「时间 + 有/缺答案图」两样，393px 的屏上排下来
      约 205px，留下 250px 是够的；知识点再缩进一档，36vw 里也还放得下四五个字。
      两头都收了口：最窄 8rem —— 再窄树里的名字就只剩两个字，等于没法点；
-     最宽 11rem —— 它只是一列筛选，宽屏上再宽也没用，列表那边要放图。 */
+     最宽 11rem —— 它只是一列筛选，宽屏上再宽也没用，列表那边要放图。
+
+     它只是个**默认值**：用户拖过边上那条分界条之后，宽度就由 style 上的具体像素接管，
+     并存进 localStorage（见脚本里那一节）。默认跟着屏宽走、用户选过就听用户的 ——
+     这两件事都要，所以不把默认值也写死成像素。 */
   .side {
     flex: none;
+    /* 默认宽度。被用户拖过之后 style 上会有一个具体像素值把它盖掉。 */
     width: clamp(8rem, 36vw, 11rem);
     display: flex;
     flex-direction: column;
     padding: 0.6rem 0.4rem 0.6rem 0.6rem;
-    border-right: 1px solid rgba(244, 246, 251, 0.1);
+    /* 那条竖线改由 .splitter 画（它要盖在边上，而不是多占一列宽度）。 */
+  }
+  /* 分界条：10px 的命中区，只画 1px 的线。
+     负外边距让它**骑在**边线上 —— 否则它自己会额外占掉 10px，把列表挤窄。
+     `touch-action: none` 是必需的：不给的话这根手指的横滑会被外层翻页手势抢走，
+     变成翻到题库/复习页（与应用里选框的四个角柄同一个道理，那边也是这么写的）。 */
+  .splitter {
+    flex: none;
+    width: 10px;
+    margin-left: -5px;
+    position: relative;
+    z-index: 1;
+    cursor: col-resize;
+    touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+    --wails-draggable: no-drag;
+  }
+  .splitter::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    width: 1px;
+    translate: -50% 0;
+    background: rgba(244, 246, 251, 0.14);
+  }
+  /* 按住时那条线亮起来、加粗一点：告诉用户「你正在拖它」。 */
+  .splitter:active::after {
+    width: 2px;
+    background: rgba(130, 200, 255, 0.75);
   }
   .listpane {
     flex: 1;
