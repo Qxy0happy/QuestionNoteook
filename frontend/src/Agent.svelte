@@ -20,6 +20,9 @@
   // 导出那一面是一个**主包**里的薄适配（bundleStager），所以它的绑定落在模块根下、
   // 文件名小写 —— 与 internal/<包>/service.ts 那套不是一个路子。
   import * as Export from '../bindings/questionbook/bundlestager';
+  // 导入那一面是内部的一个普通服务，绑定就跟着包的路径走（与 vlm / digest 同一个路子）。
+  import * as Import from '../bindings/questionbook/internal/importer/service';
+  import type { Preview, Result as ImportResult } from '../bindings/questionbook/internal/importer/models';
   import AgentChat from './AgentChat.svelte';
   import * as VLM from '../bindings/questionbook/internal/vlm/service';
   import type { Config, ConfigView } from '../bindings/questionbook/internal/vlm/models';
@@ -222,6 +225,81 @@
       exportError = errorMessage(err);
     } finally {
       exporting = false;
+    }
+  }
+
+  // ── 从导出包恢复（票 22）──
+  //
+  // 四步：挑包 → 预览 → 确认 → **重启之后才生效**。最后那一步不是偷懒：正式数据被一条
+  // 已经打开的 SQLite 连接与一个图片目录攥着，当场换等于把整张服务图重建一遍。所以 Go
+  // 那边只把包解好摆在那儿，等下次启动、库还没打开的时候换（见 internal/importer）。
+  let importBusy = $state(false);
+  let importError = $state('');
+  // 解好了、等人点头的那个包。null 表示当下没有要确认的。
+  let importPreview = $state<Preview | null>(null);
+  // 已经确认、等重启。
+  let importWaiting = $state(false);
+  // 上一次**落地**的结果（启动时那一步写的）。
+  let importLast = $state<ImportResult | null>(null);
+
+  // 读启动那一步留下的结果，以及有没有等重启的导入。
+  async function loadImportState() {
+    try {
+      const pending = await Import.Pending();
+      importWaiting = pending.Ready;
+      if (pending.Ready) importPreview = pending.Preview;
+      const last = await Import.Last();
+      importLast = last.OK || last.Problem ? last : null;
+    } catch {
+      // 读不出来不算事：这一块是诊断，缺了它少显示一行而已。
+    }
+  }
+
+  // 让用户挑一个包并解开。**它会一直等到用户选完或取消**（宿主的选择器是同步的），
+  // 所以按钮上要有个「等选择…」。
+  async function pickImportBundle() {
+    if (importBusy) return;
+    importBusy = true;
+    importError = '';
+    try {
+      const picked = await Import.PickAndPrepare();
+      if (picked.Cancelled) return; // 取消什么都没发生，不用说话
+      importPreview = picked.Preview;
+    } catch (err) {
+      importError = errorMessage(err);
+    } finally {
+      importBusy = false;
+    }
+  }
+
+  // 用户点头：盖章。到这一步**仍然没动正式数据**，它等下次启动。
+  async function confirmImport() {
+    if (importBusy) return;
+    importBusy = true;
+    importError = '';
+    try {
+      await Import.Commit();
+      importWaiting = true;
+    } catch (err) {
+      importError = errorMessage(err);
+    } finally {
+      importBusy = false;
+    }
+  }
+
+  // 反悔：把解好的包丢掉。
+  async function cancelImport() {
+    if (importBusy) return;
+    importBusy = true;
+    importError = '';
+    try {
+      await Import.Cancel();
+      importPreview = null;
+      importWaiting = false;
+    } catch (err) {
+      importError = errorMessage(err);
+    } finally {
+      importBusy = false;
     }
   }
 
@@ -459,6 +537,7 @@
 
   onMount(() => {
     void refreshSchedule();
+    void loadImportState();
 
     // 安卓上「退出应用」多半是退到后台，visibilitychange 是这里唯一抓得到的信号。
     // 用 pagehide 也行，但它在某些 WebView 里不触发；visibilitychange 稳一些。
@@ -818,8 +897,9 @@
       <hr class="sep" />
 
       <p class="note">
-        把整个错题本打成一个 zip 放进系统的「下载」目录：里面是库与全部题图答案图。
-        应用一卸载私有目录就全没了 —— 这个包是防丢的唯一手段。
+        把整个错题本打成一个 zip 放进系统的「下载」目录：里面是库、全部题图答案图，
+        外加复习与提醒这两份设置（**不含 VLM 的凭据** —— 包会落在「下载」目录，那儿别的
+        应用读得到）。应用一卸载私有目录就全没了 —— 这个包是防丢的唯一手段。
         <br />
         题图是原始像素，包可能不小；导完会在下面告诉你它落在哪。
       </p>
@@ -836,6 +916,58 @@
           {exporting ? '打包中…' : '导出整库'}
         </button>
       </div>
+
+      <hr class="sep" />
+
+      <p class="note">
+        把导出包装回来（换手机、重装之后走这一步）。它**替换**当前这个库 —— 旧的不会被删掉，
+        会被改名留在原来那个目录里，下面会告诉你路径。
+        <br />
+        确认之后要**完全关掉应用再打开**它才会生效：换库只能在启动那一刻做。
+      </p>
+
+      {#if importError}
+        <p class="banner">{importError}</p>
+      {/if}
+
+      {#if importLast}
+        <p class="banner" class:ok={importLast.OK}>
+          {#if importLast.OK}
+            上次导入已生效：{importLast.Questions} 道题、{importLast.Images} 张图。
+            {#if importLast.Backup}旧库留在 {importLast.Backup}。{/if}
+          {:else}
+            上次导入没成：{importLast.Problem}
+          {/if}
+        </p>
+      {/if}
+
+      {#if importWaiting}
+        <p class="banner ok">导入包已就绪 —— 完全关掉应用再打开，它才会换上去。</p>
+        <div class="actions">
+          <button class="pill" onclick={cancelImport} disabled={importBusy}>取消导入</button>
+        </div>
+      {:else if importPreview}
+        <p class="note">
+          这个包里有 <b>{importPreview.Questions}</b> 道题、<b>{importPreview.Images}</b> 张图（{sizeText(
+            importPreview.Bytes,
+          )}）；你现在库里有 <b>{importPreview.Current}</b> 道。
+          {#if importPreview.Settings?.length}
+            <br />包里还带着 {importPreview.Settings.join('、')}。
+          {/if}
+        </p>
+        <div class="actions">
+          <button class="pill go" onclick={confirmImport} disabled={importBusy}>
+            {importBusy ? '处理中…' : '确认导入'}
+          </button>
+          <button class="pill" onclick={cancelImport} disabled={importBusy}>取消</button>
+        </div>
+      {:else}
+        <div class="actions">
+          <button class="pill" onclick={pickImportBundle} disabled={importBusy}>
+            {importBusy ? '等选择…' : '从导出包恢复'}
+          </button>
+        </div>
+      {/if}
     </div>
   {/if}
 </div>

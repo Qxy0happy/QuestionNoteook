@@ -78,6 +78,17 @@ func (s *Store) Save(img image.Image) (Hash, error) {
 // 让 *Store 直接满足题库要的读接口 —— 依赖只能有一个方向：采集用题库建错题。
 func (s *Store) LoadByHash(hash string) (image.Image, error) { return s.Load(Hash(hash)) }
 
+// HashOf 按本包的口径算出一张图的内容 hash —— 与 Save 落盘时用的那一个是同一个算法
+// （同样的归一化、同样的逐行喂法），所以「读回来再算一次」应当得到当初那个 hash。
+//
+// 给导入那一侧用。题图在包里是**按 hash 命名**的，而这句话在搬运过一道之后需要能被核：
+// 解出来重算一遍，对不上就说明那个文件不是它该是的那张图。导出那边不核（盘上的文件名
+// 是我们自己写的），而导入面对的是一个来路在应用之外的文件，核一遍才闭合。
+func HashOf(img image.Image) Hash {
+	src, _ := canonicalRGBA(img)
+	return hashOf(src)
+}
+
 // Load 读回某个 hash 对应的题图。
 func (s *Store) Load(h Hash) (image.Image, error) {
 	f, err := os.Open(s.Path(h))

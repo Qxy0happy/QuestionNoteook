@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -37,6 +38,15 @@ const (
 	// 包是本机私有目录的镜像，解包那一侧不必再做一次名字映射。
 	ImageDir = "cards"
 )
+
+// SettingsNames 是包里可能带的那两份**库外设置**的名字（都不含凭据）。
+//
+// 两处都要这份清单：导出那边由 main.go 按它拼路径交给 WithBundleExtras，导入那边
+// 按它去包里找。定义在这里，是因为「包里有什么」这件事归这个包管 —— 抄第二份，
+// 迟早会有一边改了名字而另一边没有。
+//
+// vlm.json 刻意不在里面：它带 API key，而包会落到「下载」目录。
+var SettingsNames = []string{"review.json", "digest.json"}
 
 // ErrImageMissing 表示库里引用的一张图在盘上找不到。判断用 errors.Is。
 //
@@ -69,6 +79,9 @@ type Service struct {
 	// 中间那份库快照落哪儿。默认 os.TempDir()，安卓上得由 main.go 换成应用私有目录
 	// —— 见 WithTempDir。暂存的导出包也落在这儿（见 Stage）。
 	tempDir string
+	// extras 是除库与图之外还要打进包的**库外设置文件**（见 WithBundleExtras）。
+	// 存的是绝对路径，条目名取 base name —— 与「包里与私有目录同名」那条规矩一致。
+	extras []string
 	// now 取当前时刻。做成字段只为一件事：Stage 用日期当文件名，测试要能把它钉死。
 	now func() time.Time
 }
@@ -82,6 +95,18 @@ type Option func(*Service)
 // $TMPDIR —— 都没有保证可写。接线时把它指到应用私有目录下。
 func WithTempDir(dir string) Option {
 	return func(s *Service) { s.tempDir = dir }
+}
+
+// WithBundleExtras 指定除库与图之外**还要打进包**的库外文件（绝对路径）。
+//
+// 目前是 review.json 与 digest.json：换手机时那两样（间隔模糊、考试日期、保留率、
+// 提醒钟点）重填很烦，而它们又不含凭据 —— vlm.json 刻意**不在**这里，它带着 API key，
+// 而包会落到「下载」目录，那儿别的应用读得到。
+//
+// 条目名取文件的 base name：包是私有目录的镜像，导入那一侧就不必再做一次名字映射。
+// **文件不存在就跳过**：刚装上的机器还没有 review.json，那不是错误。
+func WithBundleExtras(paths ...string) Option {
+	return func(s *Service) { s.extras = append(s.extras, paths...) }
 }
 
 // NewService 用一个已经开好的错题库、一个图片文件层构造导出服务。
@@ -102,8 +127,8 @@ type Result struct {
 
 // WriteBundle 把整个错题本打进 w，返回这次导出的清点。
 //
-// 包里有什么是**定死**的：一份自洽的库文件，加上**库里引用到的每一张图**，一张不多一张不少。
-// 两句话都要当真 ——
+// 包里有什么是**定死**的：一份自洽的库文件，加上**库里引用到的每一张图**，一张不多一张不少，
+// 再加上（若配了 WithBundleExtras）那两份不含凭据的库外设置。前两句都要当真 ——
 //
 //   - 库里引用的每一张图都在包里：少一张，这个包就在骗人（缺图直接报错，见下）。
 //   - 包里没有库不引用的图：盘上那些没人引用的残留文件（删错题时没回收掉的）不进包。
@@ -143,6 +168,23 @@ func (s *Service) WriteBundle(w io.Writer) (Result, error) {
 	for _, h := range hashes {
 		path := s.images.PathByHash(h)
 		if err := addFile(zw, imageEntry(path), path, zip.Store); err != nil {
+			return Result{}, err
+		}
+	}
+	// 库外那两份设置（见 WithBundleExtras）。放在最后：包里的条目顺序是确定的，
+	// 同一份库导出两次要得到同样的字节。
+	for _, path := range s.extras {
+		info, err := os.Stat(path)
+		if errors.Is(err, fs.ErrNotExist) {
+			continue // 还没配过，不是错误
+		}
+		if err != nil {
+			return Result{}, fmt.Errorf("导出: 看 %s: %w", path, err)
+		}
+		if !info.Mode().IsRegular() {
+			return Result{}, fmt.Errorf("导出: %s 不是普通文件", path)
+		}
+		if err := addFile(zw, filepath.Base(path), path, zip.Deflate); err != nil {
 			return Result{}, err
 		}
 	}

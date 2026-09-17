@@ -22,6 +22,7 @@ import (
 	"questionbook/internal/digest"
 	"questionbook/internal/discussion"
 	"questionbook/internal/export"
+	"questionbook/internal/importer"
 	"questionbook/internal/library"
 	"questionbook/internal/review"
 	"questionbook/internal/tags"
@@ -39,6 +40,18 @@ func main() {
 	root, err := dataDir()
 	if err != nil {
 		log.Fatalf("拿不到应用数据目录: %v", err)
+	}
+
+	// 导入包（票 22）：上一次运行里用户若确认过一个导出包，就在**这里**把它换上 ——
+	// 必须在 library.Open 与 capture.NewStore 之前，因为它换的就是这两样东西，而那一刻
+	// 它们还没被打开（库一旦开着，改它的名字都做不到）。
+	//
+	// 失败不拦着启动：那一步自己会把旧的挪回来（见 internal/importer/apply.go），
+	// 于是这里最坏也只是「还在用原来那份库」，而不是起不来。
+	if res, err := importer.ApplyPending(root, devtz.Now); err != nil {
+		log.Printf("导入包没能落地，仍用原来那份库：%v", err)
+	} else if res.OK {
+		log.Printf("已从导出包恢复 %d 道题、%d 张图（旧库留在 %s）", res.Questions, res.Images, res.Backup)
 	}
 
 	// 题图与库文件都在这个目录下。两者都是「库外」的东西：库里只记 hash（ADR-0004）。
@@ -94,7 +107,20 @@ func main() {
 	// 配置文件与 VLM 用的是**同一份**：agent 也要模型，而模型名只能从配置来（ADR-0005）。
 	agentService := agent.NewService(readStore, pend, filepath.Join(root, "vlm.json"))
 
-	exportService := export.NewService(db, cardFiles{store: cardStore}, export.WithTempDir(root))
+	// 导出（票 13）：库里那两份**不含凭据**的库外设置也一起打进包 —— 换手机时它们不用重填。
+	// 名字的清单在 export.SettingsNames（包里有什么归那个包管），这里只负责拼路径。
+	extras := make([]string, 0, len(export.SettingsNames))
+	for _, name := range export.SettingsNames {
+		extras = append(extras, filepath.Join(root, name))
+	}
+	exportService := export.NewService(db, cardFiles{store: cardStore},
+		export.WithTempDir(root), export.WithBundleExtras(extras...))
+
+	// 导入（票 22）：把导出包装回来。**挑文件那一跳由宿主做**（安卓上是系统文档选择器），
+	// 所以这里注进去的是一个「挑一个 zip」的口子 —— 与 cardFiles / bundleStager 同一类薄壳，
+	// internal/importer 因此不必认识 Wails。
+	picker := &wailsPicker{}
+	importerService := importer.NewService(root, db, picker)
 
 	app := application.New(application.Options{
 		Name:        "错题本",
@@ -113,6 +139,7 @@ func main() {
 			application.NewService(pend),
 			// 导出只露 Stage 那一面 —— 理由见 bundleStager 的注释。
 			application.NewService(&bundleStager{svc: exportService}),
+			application.NewService(importerService),
 			// 前端启动时用它把设备时区报进来（见 deviceTime 的注释）。
 			application.NewService(&deviceTime{}),
 		},
@@ -123,6 +150,10 @@ func main() {
 			ApplicationShouldTerminateAfterLastWindowClosed: true,
 		},
 	})
+
+	// 回填 app：服务列表是传给 New 的，那会儿 app 还没生出来（而选择器要用它）。
+	// Run 之前不会有任何调用，所以这个先有鸡后有蛋的顺序是安全的。
+	picker.app = app
 
 	app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Title:            "错题本",
@@ -192,6 +223,31 @@ func (deviceTime) Get() string { return devtz.ID() }
 type bundleStager struct{ svc *export.Service }
 
 func (b bundleStager) Stage() (export.Bundle, error) { return b.svc.Stage() }
+
+// wailsPicker 把「挑一个导出包」这件事接到宿主的选择器上。
+//
+// **这一层几乎不用做事，是因为 Wails 自己就有文档选择器**：安卓上它走
+// ACTION_OPEN_DOCUMENT（SAF），选中的文件被宿主导进应用私有目录，Go 拿到的是一条**真实
+// 的文件系统路径**（见 Wails 的 dialogs_android.go 与 MainActivity.launchFilePicker）。
+// 导出那边要自己写 Java，是因为 MediaStore 的**写**没有对应的 Wails API；**读**有。
+//
+// 所以这里只定标题与类型。放在 main.go 是它与 cardFiles / bundleStager 同一类东西：
+// 接线处的薄壳，好让 internal/importer 完全不认识 Wails。
+type wailsPicker struct {
+	// app 在 application.New 之后回填 —— 见 main 里那行。
+	app *application.App
+}
+
+// PickZip 弹出系统的文件选择器，返回用户选中那个 zip 的路径；取消时返回空串。
+//
+// 它会**一直阻塞到用户选完或者取消**（底层是同步等一个 channel），所以界面那边要显示
+// 「等选择…」。这是 Wails 那边的形状，不是我们能改的。
+func (p wailsPicker) PickZip() (string, error) {
+	return p.app.Dialog.OpenFile().
+		SetTitle("选择错题本导出包").
+		AddFilter("错题本导出包", "*.zip").
+		PromptForSingleSelection()
+}
 
 // PathByHash 是导出要的那一面：它按 hash 找**盘上的文件**（不像题库那样读成 image.Image），
 // 因为导出是把原样字节搬进 zip，不该先解码再编码一遍。
