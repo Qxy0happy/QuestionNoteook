@@ -72,30 +72,18 @@ jobs:
 
       # ── 签名 ──
       #
-      # 这把包**必须**用固定的钥匙签，理由在「分发平台是 GitHub」之后变得很硬：
-      # 更新方式就是覆盖安装，而 Android 只允许同一把钥匙签的包覆盖安装。用 debug
-      # keystore 发出去的包（AGP 在缺失时自建，每台机器/每次镜像更新都可能不同一把）
-      # 以后换正式钥匙就再也覆盖不上 —— 只能卸载，而卸载 = 清空错题库：
-      # 库与图片都在应用私有目录，而导出包是**单向**的（internal/export 只有出、
-      # 没有导入的路），救不回来。
+      # 钥匙**就在仓库里**：`build/android/keystore/`（明文，自用私有仓库，2026-09-17 定）。
+      # `app/build.gradle` 自己会去读它，所以这一步不需要做任何事 —— 这里只留一段说明，
+      # 免得下一个人以为签名是漏配了。
       #
-      # 所以这里把钥匙从 secrets 落到 runner 的磁盘上，再交给 build.gradle
-      # （它读的就是 ANDROID_KEYSTORE_FILE 这几个环境变量，不用改它）。
+      # 为什么钥匙与口令能明文躺着、以及**为什么它不能换**，写在
+      # `build/android/keystore/keystore.properties` 顶部。一句话：Android 只允许同一把
+      # 钥匙签的包覆盖安装，而这个应用的更新方式就是覆盖安装；换钥匙 = 只能卸载 =
+      # 清空错题库（库与图片在应用私有目录，导出包是单向的，没有导入的路）。
       #
-      # 钥匙本体与口令的备份**不在这个仓库里**，在作者的密码管理器/本地目录里。
-      # 丢了就等于这道题永远做不出新版本 —— 别再生成一把了事。
-      - name: 准备签名用的 keystore
-        env:
-          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-        run: |
-          if [ -z "$KEYSTORE_B64" ]; then
-            echo "::error::仓库里没有 ANDROID_KEYSTORE_BASE64。用 debug keystore 发出去的包，"
-            echo "以后无法被正式钥匙签的包覆盖安装（卸载重装 = 清空错题库，而导出包没有导入的路），"
-            echo "所以这里直接失败、不发。见本步上方的注释。"
-            exit 1
-          fi
-          echo "$KEYSTORE_B64" | base64 -d > "$RUNNER_TEMP/questionbook-release.p12"
-          ls -l "$RUNNER_TEMP/questionbook-release.p12"
+      # 曾经走过的一段弯路记在这儿：一度是把钥匙存成 4 个仓库 secrets、在 CI 里 base64
+      # 还原。那套不是不行，只是对「作者只有一个、钥匙就在自己机器上」这件事来说白搭 ——
+      # 钥匙放进仓库反而少一个"密钥丢了/秘钥忘了"的失效模式。
 
       # package = build(PRODUCTION=true) + assemble:apk:release。
       # 与 ci.yml 那条 debug 路线的唯一区别就是这个 PRODUCTION：它带来
@@ -103,13 +91,6 @@ jobs:
       #
       # 默认只出 arm64。要连 x86_64（模拟器）一起出，把下面换成 android:package:fat。
       - name: 编 release 变体（PRODUCTION=true，arm64）
-        env:
-          # 这四个变量是 build.gradle 直接读的（System.getenv）。**环境变量这条通道是通的**
-          # —— 别被上面那段版本名的注释误导，那说的是 Gradle 的 ORG_GRADLE_PROJECT_ 前缀。
-          ANDROID_KEYSTORE_FILE: ${{ runner.temp }}/questionbook-release.p12
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           # 版本名跟着 tag 走：v0.2.0 → "0.2.0"。versionCode 刻意不动，理由写在
           # build.gradle 的 defaultConfig 里（抬它会让 Release 之后装不回 debug 包）。
@@ -144,10 +125,13 @@ jobs:
           echo "版本名对上了：$GOT"
 
       # 与上面那条同一个道理，但更重：签名错了的包**发出去就收不回来** —— 装过它的人
-      # （首先就是作者自己的手机）以后再也装不上正式钥匙签的版本，除非卸载 = 清库。
+      # （首先就是作者自己的手机）以后再也装不上正确钥匙签的版本，除非卸载 = 清库。
       #
-      # 指纹不是秘密，它就印在 APK 里，谁都能读，所以写在这儿而不是放进 secrets。
-      # 这个值是本地那把钥匙库的 SHA-256（`keytool -list -v` 读的），换钥匙时这里要跟着改。
+      # 这道断言现在防的是「钥匙被换了」：仓库里那把 p12 若被重新生成（或者 properties
+      # 指错了文件），下面的指纹就对不上。指纹不是秘密，它就印在 APK 里谁都能读，
+      # 所以直接写在这儿。这个值来自
+      #   keytool -list -v -keystore build/android/keystore/questionbook-release.p12
+      # 换钥匙时这里要跟着改 —— 但**换钥匙本身就意味着一次清库**，先回去读那份 properties 顶部。
       - name: 核对签名（必须是正式钥匙，不是 debug）
         run: |
           EXPECTED="C4:5F:FD:F5:2E:80:9E:DE:BB:68:69:8A:32:D3:BA:F1:F8:F3:ED:5D:41:1F:5C:CA:33:99:2F:D8:E6:5C:92:6B"

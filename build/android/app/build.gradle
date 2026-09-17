@@ -5,8 +5,9 @@ plugins {
 // 版本名可以由构建方注入 —— CI 打 tag 发 Release 时用它（值取自 tag）。
 // 本地构建没有它，退回默认的 "1.0"。
 //
-// 走**工程属性**而不是别的：CI 那边只要设 ORG_GRADLE_PROJECT_versionName 就能传进来，
-// Taskfile 与 wails3 一行都不用改。
+// 传进来的方式是 `-PversionName=x`（CI 经 Taskfile 的 GRADLE_ARGS 传）。
+// **不是** ORG_GRADLE_PROJECT_versionName 那个环境变量 —— 实测（Gradle 9.7.1）那个
+// 前缀到不了 gradle，而 `-P` 与 System.getenv 两条路都是通的。
 def injectedVersionName = project.findProperty('versionName') ?: "1.0"
 
 android {
@@ -39,19 +40,29 @@ android {
         }
     }
 
-    def keystoreFile = System.getenv("ANDROID_KEYSTORE_FILE")
-    def hasKeystore = keystoreFile != null && !keystoreFile.trim().isEmpty()
+    // ── 签名 ──
+    //
+    // 钥匙就在仓库里：build/android/keystore/（明文）。自用 + 私有仓库，2026-09-17 用户定，
+    // 理由与**为什么这把钥匙不能换**写在 keystore/keystore.properties 的顶部。
+    //
+    // 环境变量仍然优先 —— 想临时拿另一把钥匙编个包来试时不用改文件。
+    def ksProps = new Properties()
+    def ksPropsFile = rootProject.file("keystore/keystore.properties")
+    if (ksPropsFile.exists()) {
+        ksPropsFile.withInputStream { ksProps.load(it) }
+    }
+    def ksFile = System.getenv("ANDROID_KEYSTORE_FILE") ?: ksProps.getProperty("storeFile")
+    def ksAlias = System.getenv("ANDROID_KEY_ALIAS") ?: ksProps.getProperty("keyAlias")
+    def ksStorePass = System.getenv("ANDROID_KEYSTORE_PASSWORD") ?: ksProps.getProperty("storePassword")
+    def ksKeyPass = System.getenv("ANDROID_KEY_PASSWORD") ?: ksProps.getProperty("keyPassword")
 
     signingConfigs {
-        // A real keystore can be provided via environment variables; without
-        // one, release builds are signed with the debug keystore so they can
-        // be installed for testing (not suitable for Play Store uploads).
         release {
-            if (hasKeystore) {
-                storeFile file(keystoreFile)
-                storePassword System.getenv("ANDROID_KEYSTORE_PASSWORD")
-                keyAlias System.getenv("ANDROID_KEY_ALIAS")
-                keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+            if (ksFile != null) {
+                storeFile rootProject.file(ksFile)
+                storePassword ksStorePass
+                keyAlias ksAlias
+                keyPassword ksKeyPass
             }
         }
     }
@@ -60,7 +71,11 @@ android {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-            signingConfig hasKeystore ? signingConfigs.release : signingConfigs.debug
+            // 正式包**必须**用正式钥匙签。出厂脚手架这里是个兜底：
+            // 「没给钥匙就退回 debug keystore，好歹能装」—— 现在钥匙就在仓库里，那个兜底
+            // 只会把「钥匙不见了」这件事故悄悄变成「发了一个以后装不回来的包」。
+            // 所以去掉了：钥匙不在，构建直接失败。
+            signingConfig signingConfigs.release
         }
         debug {
             debuggable true

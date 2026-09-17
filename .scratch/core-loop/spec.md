@@ -218,7 +218,8 @@ Wails v3 里 `application.NewService(&X{})` 的 `X` 就是一个普通 Go struct
 
 - `build/android/Taskfile.yml` —— Windows 宿主分支、`sort -V` 静默失败、`gradlew.bat`、`-x` 判据、反斜杠路径、去掉 `awk` 依赖；外加 `assemble:apk:release` 上的 `GRADLE_ARGS` 透传（发 Release 时注版本名用，理由写在那个 var 的注释里）
 - `build/android/build.gradle` + Gradle wrapper —— AGP 9.2.0、Gradle 9.7.1、腾讯云镜像
-- `build/android/app/build.gradle` + `strings.xml` —— 应用身份（applicationId 与显示名）；外加 `versionName` 改成可由 `-PversionName` 注入（本地构建无此参数时仍是 `"1.0"`，`versionCode` 刻意不动）
+- `build/android/app/build.gradle` + `strings.xml` —— 应用身份（applicationId 与显示名）；外加 `versionName` 改成可由 `-PversionName` 注入（本地构建无此参数时仍是 `"1.0"`，`versionCode` 刻意不动）；以及**签名**：改成读 `keystore/keystore.properties`，并去掉脚手架那个「没钥匙就退回 debug keystore」的兜底（钥匙不在就构建失败，而不是发一个以后装不回来的包）
+- `build/android/keystore/` —— **我们自己加的**（不是脚手架产物，re-init 不会把它加回来）：发版的签名钥匙（`questionbook-release.p12`）与口令（`keystore.properties`），明文。**这把钥匙不能换**，理由写在那份 properties 顶部
 - `build/android/app/src/main/java/com/wails/app/MainActivity.java` —— **补 `WebChromeClient`**。出厂脚手架整个包里一个都没有，于是 `getUserMedia` 一律被拒；另外补了 console → logcat 的转发
 - `build/ios/app_options_default.go` —— **删除**。它的 `!ios` 标签会让其它平台的 `go build ./...` 失败（详见该次提交）
 

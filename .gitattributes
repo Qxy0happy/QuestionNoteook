@@ -9,6 +9,10 @@
 *.ps1 text eol=crlf
 
 # 二进制：别做行尾转换
+# （签名钥匙这两条不是形式主义：上面那条 `* text=auto` 要是把 .p12 判成文本，
+#   进了仓库再取出来就是另一个文件了 —— 钥匙废掉，而它换不得，见 build/android/keystore/）
+*.p12 binary
+*.jks binary
 *.png binary
 *.jpg binary
 *.jpeg binary
