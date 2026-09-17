@@ -2,6 +2,13 @@ plugins {
     id 'com.android.application'
 }
 
+// 版本名可以由构建方注入 —— CI 打 tag 发 Release 时用它（值取自 tag）。
+// 本地构建没有它，退回默认的 "1.0"。
+//
+// 走**工程属性**而不是别的：CI 那边只要设 ORG_GRADLE_PROJECT_versionName 就能传进来，
+// Taskfile 与 wails3 一行都不用改。
+def injectedVersionName = project.findProperty('versionName') ?: "1.0"
+
 android {
     namespace 'com.wails.app'
     compileSdk 35
@@ -17,7 +24,14 @@ android {
         minSdk 21
         targetSdk 35
         versionCode 1
-        versionName "1.0"
+        // 显示用的版本名（见文件顶部 injectedVersionName）。
+        //
+        // **刻意不动 versionCode**：安装器拿它判断升降级，而本地 debug 包一直是 1。
+        // 把它抬上去（比如取 CI 的 run number）会造成一个很不划算的后果 —— 「发过 Release
+        // 之后再也装不回 debug 包」：adb install -r 会报 INSTALL_FAILED_VERSION_DOWNGRADE，
+        // 而绕过它的唯一办法是先卸载，卸载等于清掉应用私有目录里的库和图片，不可恢复。
+        // 所以版本号这件事只动显示，不动安装行为。
+        versionName injectedVersionName
 
         // Configure supported ABIs
         ndk {

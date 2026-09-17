@@ -1,0 +1,137 @@
+name: Release
+
+# 打 tag 就出包：
+#
+#     git tag v0.1.0 && git push origin v0.1.0
+#
+# 为什么单独一个工作流、不挂在 ci.yml 上：触发条件不一样（那边是 push 到 main 与 PR），
+# 做的事也不一样 —— 那边是**检查**，这里是**出货**。混在一起会让每个 PR 的检查里
+# 都多出一堆用不上的安卓打包步骤与写权限。
+on:
+  push:
+    tags:
+      - 'v*'
+
+# gh release create 要写权限。**给在作业一级，不给整个工作流**。
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: 编 release APK 并发 Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # 版本从 go.mod 读，不在这儿再写一遍（与 ci.yml 同一个理由）。
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      # wails3 这个 CLI 自己依赖 gtk4 / webkitgtk-6.0 的开发包 —— 即使这一趟只跑安卓的
+      # 任务，也得先把 CLI 编出来。缺了它 `go install` 会以
+      # "Package gtk4 was not found in the pkg-config search path" 失败。
+      - name: 装 wails3 CLI 在 Linux 上要的那两个开发包
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-4-dev libwebkitgtk-6.0-dev
+
+      # 与 ci.yml 的 android 作业同一段：镜像里有 Android SDK，但 cmdline-tools 那个 bin
+      # 不在 PATH 上，得按目录找（目录名是版本号，各镜像不一样）。
+      - name: 装 NDK 与 platform
+        run: |
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          bin=$(ls -d "$SDK"/cmdline-tools/*/bin 2>/dev/null | tail -1)
+          if [ -z "$bin" ]; then
+            echo "找不到 cmdline-tools，$SDK 下有什么："
+            ls "$SDK" || true
+            exit 1
+          fi
+          export PATH="$bin:$PATH"
+          sdkmanager --version
+          yes | sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;27.0.12077973"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.4.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - run: pnpm install --frozen-lockfile
+        working-directory: frontend
+
+      - run: go install github.com/wailsapp/wails/v3/cmd/wails3@v3.0.0-beta.22
+
+      # package = build(PRODUCTION=true) + assemble:apk:release。
+      # 与 ci.yml 那条 debug 路线的唯一区别就是这个 PRODUCTION：它带来
+      # -tags production -trimpath -ldflags="-w -s"（去掉调试符号，体积更小）。
+      #
+      # 默认只出 arm64。要连 x86_64（模拟器）一起出，把下面换成 android:package:fat。
+      #
+      # 签名：**没配 ANDROID_KEYSTORE_FILE 时，release 包用的是 debug keystore**
+      # （见 app/build.gradle 的 signingConfig 那行）。自用够了，但有个后果要留意 ——
+      # runner 是干净的一次性机器，~/.android/debug.keystore 不存在时由 AGP 自行生成，
+      # 所以 CI 那台机器上的那把钥匙**很可能**与你本机（乃至两次 CI 之间）不是同一把。
+      # 那样这份包与本地构建互相覆盖时会撞 INSTALL_FAILED_UPDATE_INCOMPATIBLE，
+      # 而绕过它要先卸载 = 清库。
+      #
+      # 这一条我**没有实测过**（没拿 CI 编的包比过证书指纹），是从「AGP 缺失时自建
+      # debug keystore」推的。要彻底消掉这个不确定性，生成一个自己的 keystore 放进
+      # 仓库 secrets（ANDROID_KEYSTORE_FILE / _PASSWORD / KEY_ALIAS / KEY_PASSWORD），
+      # 那时 build.gradle 会自动改用它 —— 那条路是确定的。
+      - name: 编 release 变体（PRODUCTION=true，arm64）
+        run: |
+          # 版本名跟着 tag 走：v0.2.0 → "0.2.0"。versionCode 刻意不动，理由写在
+          # build.gradle 的 defaultConfig 里（抬它会让 Release 之后装不回 debug 包）。
+          #
+          # 走 GRADLE_ARGS 这个任务变量，**不是环境变量** —— 实测 ORG_GRADLE_PROJECT_
+          # versionName 穿不过 `wails3 task`（到不了 gradle，而直接调 gradlew 能到），
+          # 详见 build/android/Taskfile.yml 里 assemble:apk:release 的那段注释。
+          VERSION="${GITHUB_REF_NAME#v}"
+          wails3 task android:package ARCH=arm64 GRADLE_ARGS="-PversionName=${VERSION}"
+
+      # 两道：先把产物与元数据打进日志（出问题不用下 APK 去反解），再**断言**版本名真的
+      # 注进去了。
+      #
+      # 这条断言不是形式主义：版本名漏注时构建照样成功、APK 照样能装，只有装上之后
+      # 看一眼「应用信息」才会发现它写着 1.0 —— 而那时 Release 已经发出去了。
+      # 加它是因为本地串这条路径时就**静默失败过一次**（环境变量的做法到不了 gradle，
+      # 见上一段），而那次唯一的迹象就是元数据里那个 1.0。
+      - name: 核对产出（版本名必须等于 tag）
+        run: |
+          test -f bin/questionbook.apk
+          ls -l bin/questionbook.apk
+
+          META=build/android/app/build/outputs/apk/release/output-metadata.json
+          cat "$META"
+
+          VERSION="${GITHUB_REF_NAME#v}"
+          GOT=$(grep -o '"versionName": "[^"]*"' "$META" | cut -d'"' -f4)
+          if [ "$GOT" != "$VERSION" ]; then
+            echo "APK 里的 versionName 是「$GOT」，tag 是「$VERSION」—— 没注进去，别发这个包。"
+            exit 1
+          fi
+          echo "版本名对上了：$GOT"
+
+      # 下载下来的文件名自带版本与架构，而不是一个没有上下文的 questionbook.apk。
+      - name: 改名
+        run: cp bin/questionbook.apk "questionbook-${GITHUB_REF_NAME}-arm64.apk"
+
+      # --generate-notes：按提交自动写 release notes（首次发版会把全部提交列上）。
+      # 要发预览版就给 tag 带个短横线（v0.2.0-rc1）并加 --prerelease。
+      - name: 建 Release 并附上 APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "questionbook-${GITHUB_REF_NAME}-arm64.apk" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes
