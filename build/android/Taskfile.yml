@@ -248,10 +248,14 @@ tasks:
       # 额外的 gradle 参数，由调用方传进来。CI 发 Release 时用它注版本名：
       #   wails3 task android:package GRADLE_ARGS="-PversionName=0.2.0"
       #
-      # 为什么要绕这一道、而不是让 gradle 自己去读环境变量：**环境变量穿不过
-      # `wails3 task`**。实测 ORG_GRADLE_PROJECT_versionName 在经由这个 CLI 跑时到不了
-      # gradle（直接调 gradlew 则能到；换掉常驻 daemon 重试也一样），所以参数只能跟着
-      # gradlew 的命令行走。ARCH 用的也是这条通道。
+      # 为什么版本名走这条通道、而不是用 ORG_GRADLE_PROJECT_versionName：**Gradle 那个
+      # 前缀到不了 gradle**。实测（9.7.1）经 `wails3 task` 与直接调 gradlew 都读不到它 ——
+      # 换掉常驻 daemon、47 个任务全量重建之后，元数据里仍是旧值。
+      #
+      # 别把这件事记成「环境变量穿不过 `wails3 task`」——**那句是错的**。环境变量是通的：
+      # 拿 ANDROID_KEYSTORE_FILE 指一个不存在的路径试过，gradle 确实因此去要那个
+      # storeFile 并报「Input file does not exist」，而签名那四个变量就靠它。
+      # 出问题的只是 ORG_GRADLE_PROJECT_ 这个前缀。
       #
       # 空着不影响任何东西 —— 默认就是不加参数。
       GRADLE_ARGS: '{{.GRADLE_ARGS | default ""}}'
